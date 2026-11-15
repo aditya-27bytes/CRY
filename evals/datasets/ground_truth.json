@@ -1,0 +1,47 @@
+[
+  {
+    "case_id": "juice-shop-sqli-01",
+    "name": "User Search SQL Injection (Juice Shop)",
+    "source": "OWASP Juice Shop / routes/search.ts",
+    "file_path": "evals/datasets/samples/sqli_vulnerable.ts",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-89",
+    "expected_severity": "CRITICAL"
+  },
+  {
+    "case_id": "safe-sqli-param-02",
+    "name": "Parameterized Query (Safe Trap)",
+    "source": "Synthetic / routes/user.ts",
+    "file_path": "evals/datasets/samples/sqli_safe.ts",
+    "is_vulnerability": false,
+    "expected_cwe": null,
+    "expected_severity": null
+  },
+  {
+    "case_id": "hardcoded-stripe-key-03",
+    "name": "Live Stripe Secret Key in Config",
+    "source": "Synthetic / config/billing.ts",
+    "file_path": "evals/datasets/samples/secrets_vulnerable.ts",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-798",
+    "expected_severity": "CRITICAL"
+  },
+  {
+    "case_id": "safe-mock-token-04",
+    "name": "Mock Token in Test File (Safe Trap)",
+    "source": "Synthetic / tests/mock_auth.ts",
+    "file_path": "evals/datasets/samples/secrets_mock.ts",
+    "is_vulnerability": false,
+    "expected_cwe": null,
+    "expected_severity": null
+  },
+  {
+    "case_id": "juice-shop-open-redirect-05",
+    "name": "Unvalidated URL Redirect",
+    "source": "OWASP Juice Shop / routes/redirect.ts",
+    "file_path": "evals/datasets/samples/open_redirect.ts",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-601",
+    "expected_severity": "MEDIUM"
+  }
+]

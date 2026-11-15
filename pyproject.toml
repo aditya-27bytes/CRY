@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cry"
+version = "0.1.0"
+description = "Open-source security testing platform for indie developers and small teams"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "CRY Core Team" }
+]
+keywords = [
+    "security",
+    "vulnerability-scanner",
+    "sast",
+    "dast",
+    "ai-triage",
+    "appsec",
+    "indie-dev"
+]
+dependencies = [
+    "pydantic>=2.7.0",
+    "typer>=0.12.3",
+    "rich>=13.7.1",
+    "openai>=1.30.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+cry = "cry.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/fixtures/**" = ["F821", "F841", "E402"]
+"evals/datasets/samples/**" = ["F821", "F841", "E402"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+exclude = ["tests/fixtures", "evals/datasets/samples"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

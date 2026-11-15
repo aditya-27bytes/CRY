@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Secrets & Environment variables
+.env
+*.local
+secrets/
+
+# Scanners temp output / reports
+reports/
+*.sarif
+*.zap.json
+*.semgrep.json
+scan_output/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking & Linters
+.mypy_cache/
+.ruff_cache/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Logs & scratch test files
+*.log
+AUDIT_TEST.md
+scratch/
