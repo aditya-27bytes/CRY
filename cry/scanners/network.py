@@ -259,6 +259,35 @@ class NetworkAuditReport:
     error_message: str | None = None
 
 
+@dataclass
+class DiscoveredEndpoint:
+    """A network endpoint or IP discovered within codebase or configuration files."""
+
+    raw_reference: str
+    host: str
+    source_file: str
+    line_number: int
+    resolved_ips: list[str] = field(default_factory=list)
+    reverse_dns: str | None = None
+    is_private: bool = False
+    is_metadata: bool = False
+    ssrf_warning: str | None = None
+
+
+@dataclass
+class ProjectNetworkReport:
+    """Network intelligence and IP footprint audit across an entire project directory."""
+
+    project_dir: str
+    local_hostname: str
+    local_outbound_ip: str
+    discovered_endpoints: list[DiscoveredEndpoint] = field(default_factory=list)
+    total_endpoints_found: int = 0
+    ssrf_risks_count: int = 0
+    private_ips_count: int = 0
+    scan_timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
 def _clean_target_hostname(raw_target: str) -> str:
     """Extract clean hostname from URL or input string."""
     target = raw_target.strip()
@@ -292,7 +321,7 @@ def resolve_ip_and_dns(hostname: str) -> tuple[list[str], list[str], str | None,
                 ipv4_list.append(ip_str)
             elif family == socket.AF_INET6 and ip_str not in ipv6_list:
                 ipv6_list.append(ip_str)
-    except socket.gaierror:
+    except (socket.gaierror, UnicodeError, OSError, ValueError):
         pass
 
     # Evaluate IP risks (Private subnets or Cloud Metadata IP)
@@ -512,6 +541,103 @@ def audit_network_target(target: str) -> NetworkAuditReport:
         security_headers=headers,
         security_score=grade,
     )
+
+
+def audit_project_network(project_dir: Path) -> ProjectNetworkReport:
+    """Scan project files to discover all declared network endpoints and perform live IP/SSRF resolution."""
+    p = project_dir.resolve()
+    local_hostname = socket.gethostname()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            local_outbound_ip = str(s.getsockname()[0])
+    except Exception:
+        local_outbound_ip = "127.0.0.1"
+
+    report = ProjectNetworkReport(
+        project_dir=str(p),
+        local_hostname=local_hostname,
+        local_outbound_ip=local_outbound_ip,
+    )
+
+    if not p.is_dir():
+        return report
+
+    url_pattern = re.compile(
+        r"""(?:https?|postgres|postgresql|mysql|redis|mongodb|amqp|wss?)://([a-zA-Z0-9\.\-_:]+)""",
+        re.IGNORECASE,
+    )
+    ip_pattern = re.compile(r"""\b((?:[0-9]{1,3}\.){3}[0-9]{1,3})\b""")
+
+    seen_hosts: set[str] = set()
+
+    for file_path in p.rglob("*"):
+        if not file_path.is_file() or _should_skip(file_path):
+            continue
+        rel_path = str(file_path.relative_to(p))
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        for line_num, line in enumerate(content.splitlines(), start=1):
+            line_str = line.strip()
+            if not line_str or line_str.startswith(("#", "//", "/*", "*")):
+                continue
+
+            extracted_hosts: list[tuple[str, str]] = []
+
+            # Check URLs
+            for match in url_pattern.finditer(line_str):
+                raw_ref = match.group(0)
+                netloc = match.group(1).split("@")[-1]
+                host = netloc.split("/")[0].split(":")[0].strip(" ./:;'\"`()[]{}<>").lower()
+                if (
+                    host
+                    and len(host) >= 3
+                    and not host.startswith(".")
+                    and not host.endswith(".")
+                    and ".." not in host
+                    and host not in seen_hosts
+                ):
+                    extracted_hosts.append((raw_ref, host))
+                    seen_hosts.add(host)
+
+            # Check raw IPs
+            for match in ip_pattern.finditer(line_str):
+                ip_cand = match.group(1).strip()
+                octets = ip_cand.split(".")
+                if (
+                    len(octets) == 4
+                    and all(o.isdigit() and 0 <= int(o) <= 255 for o in octets)
+                    and ip_cand not in {"0.0.0.0", "255.255.255.255"}
+                    and ip_cand not in seen_hosts
+                ):
+                    extracted_hosts.append((ip_cand, ip_cand))
+                    seen_hosts.add(ip_cand)
+
+            for raw_ref, host in extracted_hosts:
+                ipv4_list, _, reverse_dns, is_priv, is_meta, ssrf_warn = resolve_ip_and_dns(host)
+                endpoint = DiscoveredEndpoint(
+                    raw_reference=raw_ref,
+                    host=host,
+                    source_file=rel_path,
+                    line_number=line_num,
+                    resolved_ips=ipv4_list,
+                    reverse_dns=reverse_dns,
+                    is_private=is_priv,
+                    is_metadata=is_meta,
+                    ssrf_warning=ssrf_warn,
+                )
+                report.discovered_endpoints.append(endpoint)
+                if is_priv:
+                    report.private_ips_count += 1
+                if ssrf_warn or is_meta:
+                    report.ssrf_risks_count += 1
+
+    report.total_endpoints_found = len(report.discovered_endpoints)
+    return report
 
 
 class NetworkScanner(BaseScanner):

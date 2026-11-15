@@ -15,9 +15,11 @@ import ast
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from cry.models import Category, Finding, Severity
 from cry.scanners.base import BaseScanner
+from cry.scanners.taint import analyze_taint_in_javascript, analyze_taint_in_python
 
 # ---------------------------------------------------------------------------
 # Directories and safe paths to skip/annotate
@@ -493,6 +495,22 @@ def _extract_non_code_lines(source_text: str, extension: str) -> set[int]:
     return non_code_lines
 
 
+_CACHED_CATALOG_SAST_RULES: dict[str, list[Any]] = {}
+
+
+def _get_catalog_sast_rules(base_dir: Path, extension: str) -> list[Any]:
+    """Load and cache external catalog SAST rules for the specified extension."""
+    if extension not in _CACHED_CATALOG_SAST_RULES:
+        try:
+            from cry.rules.manager import RuleManager
+
+            mgr = RuleManager(workspace_dir=base_dir)
+            _CACHED_CATALOG_SAST_RULES[extension] = mgr.get_sast_rules(extension)
+        except Exception:
+            _CACHED_CATALOG_SAST_RULES[extension] = []
+    return _CACHED_CATALOG_SAST_RULES[extension]
+
+
 def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
     """Scan a single source file for dangerous code patterns."""
     findings: list[Finding] = []
@@ -547,6 +565,23 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                 if in_safe_path:
                     description += " (This file is in a test/mock directory — verify if this file is deployed to production)."
 
+                # Evaluate AST taint for this line
+                taint = None
+                if extension == ".py":
+                    taint = analyze_taint_in_python(file_path, line_num)
+                elif extension in {".ts", ".tsx", ".js", ".jsx"}:
+                    taint = analyze_taint_in_javascript(content, line_num)
+
+                confidence = 1.0
+                t_src = None
+                t_sink = None
+                if taint:
+                    confidence = taint.confidence
+                    t_src = taint.source
+                    t_sink = taint.sink
+                    if taint.explanation and taint.is_tainted:
+                        description += f" [AST Dataflow: {taint.explanation}]"
+
                 rule_fix_hint, rule_suggested_fix = rule.get_fix(extension)
                 finding = Finding(
                     id=f"sast-{uuid.uuid4().hex[:12]}",
@@ -563,8 +598,42 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                     fix_hint=rule_fix_hint,
                     suggested_fix=rule_suggested_fix,
                     raw_evidence=f"Rule: {rule.rule_id} | Fix: {rule_fix_hint}",
+                    confidence=confidence,
+                    taint_source=t_src,
+                    taint_sink=t_sink,
                 )
                 findings.append(finding)
+
+        # Check external declarative SAST rules
+        for ext_rule in _get_catalog_sast_rules(base_dir, extension):
+            if any(f.line_start == line_num and f.title == ext_rule.name for f in findings):
+                continue
+            for pat in ext_rule.compile_patterns(re.IGNORECASE):
+                if pat.search(line):
+                    desc = ext_rule.description
+                    if in_safe_path:
+                        desc += " (This file is in a test/mock directory — verify if this file is deployed to production)."
+                    rule_fix_hint, rule_suggested_fix = ext_rule.fix_hint, (ext_rule.suggested_fix or "")
+                    findings.append(
+                        Finding(
+                            id=f"sast-{uuid.uuid4().hex[:12]}",
+                            tool="cry-sast",
+                            title=ext_rule.name,
+                            description=desc,
+                            category=ext_rule.category,
+                            severity=ext_rule.severity,
+                            file_path=relative_path,
+                            line_start=line_num,
+                            line_end=line_num,
+                            code_snippet=stripped[:200],
+                            cwe_id=ext_rule.cwe_id,
+                            fix_hint=rule_fix_hint,
+                            suggested_fix=rule_suggested_fix,
+                            raw_evidence=f"External Rule: {ext_rule.rule_id} | Fix: {rule_fix_hint}",
+                            confidence=1.0,
+                        )
+                    )
+                    break
 
     return findings
 

@@ -1,5 +1,7 @@
 """Security triage prompts and context assembly for CRY."""
 
+from collections.abc import Sequence
+
 from cry.models import Finding
 
 TRIAGE_SYSTEM_PROMPT = """You are a Principal Application Security Architect performing deep, high-assurance security triage for an indie developer or startup engineering team.
@@ -39,8 +41,11 @@ You MUST respond strictly with valid JSON conforming to this schema:
 """
 
 
-def build_triage_user_prompt(findings_with_context: list[tuple[Finding, str | None]]) -> str:
-    """Build the user prompt containing findings and their extracted code context."""
+def build_triage_user_prompt(
+    findings_with_context: list[tuple[Finding, str | None]],
+    context_graphs: Sequence[str | None] | None = None,
+) -> str:
+    """Build the user prompt containing findings, extracted code context, and AST taint graph."""
     lines: list[str] = [
         f"Please perform deep security triage on the following {len(findings_with_context)} finding(s) with their code context:\n"
     ]
@@ -52,10 +57,15 @@ def build_triage_user_prompt(findings_with_context: list[tuple[Finding, str | No
         lines.append(f"Rule / Title: {finding.title}")
         lines.append(f"Category: {finding.category.value}")
         lines.append(f"Raw Severity: {finding.severity.value}")
+        lines.append(f"Confidence: {finding.confidence:.2f}")
         lines.append(f"CWE: {finding.cwe_id or 'None'}")
         lines.append(f"File: {finding.file_path or 'unknown'}")
         lines.append(f"Line: {finding.line_start}")
         lines.append(f"Offending Snippet: {finding.code_snippet or 'None'}")
+
+        if context_graphs and (i - 1) < len(context_graphs) and context_graphs[i - 1]:
+            lines.append("AST DATAFLOW & STRUCTURAL GRAPH:")
+            lines.append(context_graphs[i - 1] or "")
 
         if context:
             lines.append("SURROUNDING CODE CONTEXT:")

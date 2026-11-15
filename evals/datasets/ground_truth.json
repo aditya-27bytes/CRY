@@ -43,5 +43,77 @@
     "is_vulnerability": true,
     "expected_cwe": "CWE-601",
     "expected_severity": "MEDIUM"
+  },
+  {
+    "case_id": "cmdi-os-system-06",
+    "name": "Command Injection via String Concatenation",
+    "source": "Synthetic / utils/diagnostics.py",
+    "file_path": "evals/datasets/samples/cmdi_vulnerable.py",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-78",
+    "expected_severity": "CRITICAL"
+  },
+  {
+    "case_id": "safe-cmdi-subprocess-07",
+    "name": "Safe Parameterized Subprocess (Safe Trap)",
+    "source": "Synthetic / utils/diagnostics_safe.py",
+    "file_path": "evals/datasets/samples/cmdi_safe.py",
+    "is_vulnerability": false,
+    "expected_cwe": null,
+    "expected_severity": null
+  },
+  {
+    "case_id": "path-traversal-open-08",
+    "name": "Path Traversal via Unvalidated File Path",
+    "source": "Synthetic / handlers/download.py",
+    "file_path": "evals/datasets/samples/path_traversal_vulnerable.py",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-22",
+    "expected_severity": "CRITICAL"
+  },
+  {
+    "case_id": "safe-path-traversal-09",
+    "name": "Path Traversal Containment Check (Safe Trap)",
+    "source": "Synthetic / handlers/download_safe.py",
+    "file_path": "evals/datasets/samples/path_traversal_safe.py",
+    "is_vulnerability": false,
+    "expected_cwe": null,
+    "expected_severity": null
+  },
+  {
+    "case_id": "ssrf-requests-get-10",
+    "name": "Server-Side Request Forgery via Direct User URL",
+    "source": "Synthetic / services/proxy.py",
+    "file_path": "evals/datasets/samples/ssrf_vulnerable.py",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-918",
+    "expected_severity": "HIGH"
+  },
+  {
+    "case_id": "safe-ssrf-whitelist-11",
+    "name": "SSRF Domain Whitelist Validation (Safe Trap)",
+    "source": "Synthetic / services/proxy_safe.py",
+    "file_path": "evals/datasets/samples/ssrf_safe.py",
+    "is_vulnerability": false,
+    "expected_cwe": null,
+    "expected_severity": null
+  },
+  {
+    "case_id": "yaml-insecure-load-12",
+    "name": "Arbitrary Code Execution via Insecure YAML Loader",
+    "source": "Synthetic / parsers/config_parser.py",
+    "file_path": "evals/datasets/samples/deserialization_vulnerable.py",
+    "is_vulnerability": true,
+    "expected_cwe": "CWE-502",
+    "expected_severity": "CRITICAL"
+  },
+  {
+    "case_id": "safe-yaml-load-13",
+    "name": "Safe YAML Loader (Safe Trap)",
+    "source": "Synthetic / parsers/config_parser_safe.py",
+    "file_path": "evals/datasets/samples/deserialization_safe.py",
+    "is_vulnerability": false,
+    "expected_cwe": null,
+    "expected_severity": null
   }
 ]

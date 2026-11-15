@@ -31,6 +31,21 @@ class Settings:
     LOG_LEVEL: str = os.getenv("CRY_LOG_LEVEL", "INFO")
 
     @classmethod
+    def override(
+        cls,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        """Dynamically override model, base_url, or API key for this execution."""
+        if model:
+            cls.LLM_MODEL = model
+        if base_url:
+            cls.LLM_BASE_URL = base_url.rstrip("/")
+        if api_key is not None:
+            cls.LLM_API_KEY = api_key
+
+    @classmethod
     def is_local_llm(cls) -> bool:
         """Check if LLM is pointing to a local host (Ollama / vLLM / LocalAI)."""
         return "localhost" in cls.LLM_BASE_URL or "127.0.0.1" in cls.LLM_BASE_URL

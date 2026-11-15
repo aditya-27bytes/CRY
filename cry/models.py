@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +66,16 @@ class Finding(BaseModel):
     fix_hint: str | None = Field(default=None, description="Actionable instruction on how to fix")
     suggested_fix: str | None = Field(default=None, description="Exact replacement code or pattern")
     raw_evidence: str | None = Field(default=None, description="Raw tool output/payload")
+    confidence: float = Field(
+        default=1.0,
+        description="Confidence score (0.0 to 1.0) enriched by AST/taint and heuristic analysis",
+    )
+    taint_source: str | None = Field(
+        default=None, description="Identified untrusted input source (e.g. req.query, argv)"
+    )
+    taint_sink: str | None = Field(
+        default=None, description="Identified dangerous execution sink (e.g. cursor.execute, eval)"
+    )
 
 
 class TriagedFinding(BaseModel):
@@ -77,6 +88,10 @@ class TriagedFinding(BaseModel):
     finding: Finding
     status: TriageStatus = Field(
         default=TriageStatus.NEEDS_MANUAL_REVIEW, description="Triage status assigned by the model"
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="Confidence score (0.0 to 1.0) assigned after context and LLM analysis",
     )
     exploitability_reasoning: str = Field(
         description="Detailed reasoning for why this is or isn't realistically exploitable"
@@ -121,3 +136,86 @@ class VerdictReport(BaseModel):
     # Telemetry & Performance
     scan_duration_seconds: float = 0.0
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class ModelBenchmarkScorecard(BaseModel):
+    """Evaluation scorecard for an individual AI model against ground truth cases."""
+
+    model_name: str
+    provider_endpoint: str
+    total_cases: int = 0
+    true_positives: int = 0
+    true_negatives: int = 0
+    false_positives: int = 0
+    false_negatives: int = 0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1_score: float = 0.0
+    latency_seconds: float = 0.0
+    actionable_patch_rate: float = 0.0
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    missed_case_ids: list[str] = Field(default_factory=list)
+    wrongly_flagged_case_ids: list[str] = Field(default_factory=list)
+
+    def compute_metrics(self) -> None:
+        """Calculate Precision, Recall, and F1 score."""
+        denom_p = self.true_positives + self.false_positives
+        self.precision = (self.true_positives / denom_p) if denom_p > 0 else 0.0
+
+        denom_r = self.true_positives + self.false_negatives
+        self.recall = (self.true_positives / denom_r) if denom_r > 0 else 0.0
+
+        if self.precision + self.recall > 0:
+            self.f1_score = 2 * (self.precision * self.recall) / (self.precision + self.recall)
+        else:
+            self.f1_score = 0.0
+
+
+class ModelComparisonLeaderboard(BaseModel):
+    """Comparative benchmarking results for multiple models side-by-side."""
+
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    scorecards: list[ModelBenchmarkScorecard] = Field(default_factory=list)
+
+    def get_recommendation(self) -> dict[str, Any] | None:
+        """Analyze scorecards and determine the optimal model recommendation."""
+        if not self.scorecards:
+            return None
+
+        def rank_key(card: ModelBenchmarkScorecard) -> tuple[int, float, float, float]:
+            return (
+                -card.false_negatives,
+                card.f1_score,
+                -card.latency_seconds,
+                -card.token_usage.estimated_cost_usd,
+            )
+
+        winner = max(self.scorecards, key=rank_key)
+        fastest = min(self.scorecards, key=lambda c: c.latency_seconds)
+        cheapest = min(self.scorecards, key=lambda c: c.token_usage.estimated_cost_usd)
+
+        reasons = []
+        if winner.false_negatives == 0:
+            reasons.append("Zero False Negatives (100% security recall on ground truth)")
+        else:
+            reasons.append(f"Lowest False Negatives ({winner.false_negatives} missed)")
+
+        reasons.append(f"F1 Accuracy Score: {winner.f1_score:.1%}")
+
+        if winner.model_name == fastest.model_name:
+            reasons.append(f"Fastest triage turnaround ({winner.latency_seconds:.2f}s)")
+        else:
+            reasons.append(f"Triage latency: {winner.latency_seconds:.2f}s")
+
+        if winner.model_name == cheapest.model_name:
+            reasons.append(f"Lowest token cost (${winner.token_usage.estimated_cost_usd:.4f})")
+
+        return {
+            "winner_model": winner.model_name,
+            "f1_score": winner.f1_score,
+            "latency": winner.latency_seconds,
+            "cost": winner.token_usage.estimated_cost_usd,
+            "reasons": reasons,
+            "fastest_model": fastest.model_name,
+            "cheapest_model": cheapest.model_name,
+        }

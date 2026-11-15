@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -15,13 +16,28 @@ from rich.table import Table
 
 from cry import __version__
 from cry.config import settings
+from cry.evals.benchmark import (
+    export_benchmark_markdown,
+    run_model_benchmark,
+    run_multi_model_benchmark,
+)
 from cry.models import Finding
 from cry.reporters.json_reporter import export_json_report
 from cry.reporters.markdown import export_markdown_report, export_network_markdown_report
-from cry.reporters.terminal import print_network_report, print_verdict_report
+from cry.reporters.terminal import (
+    print_benchmark_scorecard,
+    print_model_comparison_table,
+    print_network_report,
+    print_verdict_report,
+)
+from cry.rules.manager import RuleManager
 from cry.scanners.config_audit import scan_configurations
 from cry.scanners.dependencies import DependencyScanner, scan_dependencies
-from cry.scanners.network import audit_network_target, scan_network_code_patterns
+from cry.scanners.network import (
+    audit_network_target,
+    audit_project_network,
+    scan_network_code_patterns,
+)
 from cry.scanners.sast import SASTScanner
 from cry.scanners.sast import scan_directory as scan_sast
 from cry.scanners.secrets import SecretsScanner
@@ -66,6 +82,13 @@ def is_git_repository_url(url: str) -> bool:
 def is_http_url(url: str) -> bool:
     """Check if target string is an HTTP/HTTPS URL."""
     return url.strip().lower().startswith(("http://", "https://"))
+
+
+def _unwrap_param(val: Any, default: Any = None) -> Any:
+    """Safely unwrap Typer ParameterInfo when command functions are invoked directly in Python."""
+    if isinstance(val, typer.models.ParameterInfo):
+        return val.default if val.default is not ... else default
+    return val
 
 
 def print_banner() -> None:
@@ -129,9 +152,12 @@ def interactive_menu() -> None:
         )
         menu_table.add_row("[6]", "Configure LLM", "Set up your Groq / Ollama API key and models")
         menu_table.add_row(
-            "[7]", "Quickstart Guide", "Show terminal cheat sheet and CLI usage examples"
+            "[7]", "Rules Catalog", "View and test declarative SAST & Secrets rule catalog"
         )
-        menu_table.add_row("[8]", "Exit", "Close CRY")
+        menu_table.add_row(
+            "[8]", "Quickstart Guide", "Show terminal cheat sheet and CLI usage examples"
+        )
+        menu_table.add_row("[9]", "Exit", "Close CRY")
 
         console.print(menu_table)
         console.print()
@@ -139,7 +165,7 @@ def interactive_menu() -> None:
         try:
             choice = Prompt.ask(
                 "[bold cyan]Select an option[/bold cyan]",
-                choices=["1", "2", "3", "4", "5", "6", "7", "8"],
+                choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
                 default="1",
             )
         except (KeyboardInterrupt, EOFError):
@@ -166,8 +192,8 @@ def interactive_menu() -> None:
 
         elif choice == "3":
             net_target = Prompt.ask(
-                "[bold]Enter domain name, IP address, or URL to inspect[/bold]",
-                default="google.com",
+                "[bold]Enter domain, IP, or '.' for project network discovery[/bold]",
+                default=".",
             )
             net(target=net_target, markdown_output=None)
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
@@ -177,20 +203,33 @@ def interactive_menu() -> None:
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "5":
-            console.print("\n[bold cyan]Running Accuracy Benchmark...[/bold cyan]")
-            from evals.runner import load_ground_truth, print_scorecard, score_triage_run
-
-            dataset_file = Path(__file__).parent.parent / "evals" / "datasets" / "ground_truth.json"
-            samples_dir = Path(__file__).parent.parent / "evals" / "datasets" / "samples"
-            if dataset_file.exists():
-                cases = load_ground_truth(dataset_file)
-                raw = scan_secrets(samples_dir) + scan_sast(samples_dir)
-                triage = TriageEngine()
-                rep = triage._heuristic_fallback(raw, samples_dir)
-                scorecard = score_triage_run(cases, rep)
-                print_scorecard(scorecard)
+            bench_type = Prompt.ask(
+                "[bold]Select benchmark type[/bold]\n  [1] Single Model / Baseline Benchmark\n  [2] Side-by-Side Multi-Model Comparison",
+                choices=["1", "2"],
+                default="1",
+            )
+            if bench_type == "1":
+                eval_command(
+                    model=None,
+                    base_url=None,
+                    api_key=None,
+                    no_ai=False,
+                    compare=None,
+                    markdown_output=None,
+                )
             else:
-                console.print("[yellow]Benchmark dataset not found.[/yellow]")
+                models_to_compare = Prompt.ask(
+                    "[bold]Enter comma-separated models to benchmark[/bold]",
+                    default="openai/gpt-oss-120b,llama-3.3-70b-versatile",
+                )
+                eval_command(
+                    model=None,
+                    base_url=None,
+                    api_key=None,
+                    no_ai=False,
+                    compare=models_to_compare,
+                    markdown_output=None,
+                )
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "6":
@@ -198,16 +237,29 @@ def interactive_menu() -> None:
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "7":
-            guide()
+            rule_action = Prompt.ask(
+                "[bold]Select rules action[/bold]\n  [1] List active rules\n  [2] Test & validate rule patterns",
+                choices=["1", "2"],
+                default="1",
+            )
+            if rule_action == "1":
+                list_rules(category=None)
+            else:
+                test_rules()
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "8":
+            guide()
+            Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
+
+        elif choice == "9":
             console.print("[bold cyan]Happy shipping! 🚀[/bold cyan]")
             break
 
 
+@app.command("configure")
 def configure_wizard() -> None:
-    """Interactive wizard to configure .env."""
+    """Interactive wizard to configure LLM API keys and model endpoints in .env."""
     console.print(Panel("[bold]CRY Configuration Wizard[/bold]", border_style="cyan"))
     env_path = Path.cwd() / ".env"
 
@@ -270,17 +322,20 @@ def guide() -> None:
 
     guide_table.add_row("cry", "Opens the interactive welcome menu", "cry")
     guide_table.add_row(
+        "cry scan", "Scans current directory with intelligent defaults", "cry scan"
+    )
+    guide_table.add_row(
         "cry scan <target>", "Scans local folder, file, or public Git URL", "cry scan ./src"
     )
     guide_table.add_row(
-        "cry scan full",
-        "Deep full-project audit (Secrets + SAST + SCA + Configs)",
-        "cry scan full",
+        "cry full",
+        "Deep full-project audit across all 5 scanners (Secrets, SAST, SCA, Configs, Net)",
+        "cry full",
     )
     guide_table.add_row(
-        "cry full",
-        "Alias for full-project audit across the entire codebase",
-        "cry full --no-ai",
+        "cry scan full",
+        "Alias for full-project audit across all 5 scanners",
+        "cry scan full",
     )
     guide_table.add_row(
         "cry scan <git_url>",
@@ -288,18 +343,46 @@ def guide() -> None:
         "cry scan https://github.com/OWASP/NodeGoat",
     )
     guide_table.add_row(
-        "cry scan <path> --no-ai", "Fast offline scan without calling LLM", "cry scan . --no-ai"
+        "cry scan --no-ai", "Fast offline scan without calling LLM", "cry scan --no-ai"
     )
     guide_table.add_row(
-        "cry scan <path> -m <file>", "Exports findings to Markdown", "cry scan . -m AUDIT.md"
+        "cry scan -m <file>", "Exports findings to Markdown", "cry scan -m AUDIT.md"
     )
     guide_table.add_row(
-        "cry scan <path> -o <file>", "Exports findings to JSON", "cry scan . -o report.json"
+        "cry scan -o <file>", "Exports findings to JSON", "cry scan -o report.json"
+    )
+    guide_table.add_row(
+        "cry net",
+        "Automated project network footprint discovery & IP resolution",
+        "cry net",
     )
     guide_table.add_row(
         "cry net <target>",
         "Live IP lookup, DNS, SSL/TLS, and HTTP security headers audit",
         "cry net google.com",
+    )
+    guide_table.add_row(
+        "cry eval",
+        "Benchmark AI model or offline baseline on ground truth",
+        "cry eval",
+    )
+    guide_table.add_row(
+        "cry eval --compare",
+        "Compare multiple models side-by-side on accuracy, latency, and cost",
+        "cry eval --compare 'gpt-oss-120b,llama3.3:70b'",
+    )
+    guide_table.add_row(
+        "cry rules",
+        "List all declarative SAST & Secrets rules in active catalog",
+        "cry rules",
+    )
+    guide_table.add_row(
+        "cry rules test",
+        "Validate regex syntax and sample matches for all rules",
+        "cry rules test",
+    )
+    guide_table.add_row(
+        "cry configure", "Launch interactive wizard to set up LLM API keys", "cry configure"
     )
     guide_table.add_row("cry check", "Checks system readiness and API keys", "cry check")
     guide_table.add_row("cry guide", "Displays this help cheat sheet", "cry guide")
@@ -390,8 +473,35 @@ def scan(
         "-m",
         help="Path to export report as Markdown (e.g. -m AUDIT.md)",
     ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="AI model identifier for triage (e.g. openai/gpt-oss-120b, llama3.3:70b)",
+    ),
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help="Custom OpenAI-compatible LLM endpoint URL",
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="API key for custom model endpoint",
+    ),
 ) -> None:
     """Scan a codebase, single file, or public Git repo for secrets & vulnerabilities."""
+    target = str(_unwrap_param(target, "."))
+    full = bool(_unwrap_param(full, False))
+    no_ai = bool(_unwrap_param(no_ai, False))
+    json_output = _unwrap_param(json_output, None)
+    markdown_output = _unwrap_param(markdown_output, None)
+    model = _unwrap_param(model, None)
+    base_url = _unwrap_param(base_url, None)
+    api_key = _unwrap_param(api_key, None)
+
+    if model or base_url or (api_key is not None):
+        settings.override(model=model, base_url=base_url, api_key=api_key)
+
     start_time = time.time()
     provider_type = "Local (Private)" if settings.is_local_llm() else "Cloud API"
 
@@ -525,16 +635,47 @@ def full(
         "-m",
         help="Path to export report as Markdown (e.g. -m AUDIT.md)",
     ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="AI model identifier for triage (e.g. openai/gpt-oss-120b, llama3.3:70b)",
+    ),
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help="Custom OpenAI-compatible LLM endpoint URL",
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="API key for custom model endpoint",
+    ),
 ) -> None:
     """Scan the entire project for all vulnerabilities, secrets, dependencies, and configuration flaws."""
-    scan(target=".", full=True, no_ai=no_ai, json_output=json_output, markdown_output=markdown_output)
+    no_ai = bool(_unwrap_param(no_ai, False))
+    json_output = _unwrap_param(json_output, None)
+    markdown_output = _unwrap_param(markdown_output, None)
+    model = _unwrap_param(model, None)
+    base_url = _unwrap_param(base_url, None)
+    api_key = _unwrap_param(api_key, None)
+
+    scan(
+        target=".",
+        full=True,
+        no_ai=no_ai,
+        json_output=json_output,
+        markdown_output=markdown_output,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+    )
 
 
 @app.command()
 def net(
     target: str = typer.Argument(
-        ...,
-        help="Domain name, IP address, or URL to inspect (e.g. google.com, 1.1.1.1, https://api.mysite.com)",
+        ".",
+        help="Domain name, IP address, URL, or '.' for automated project network footprint & IP discovery",
     ),
     markdown_output: Path | None = typer.Option(
         None,
@@ -543,15 +684,181 @@ def net(
         help="Path to export network intelligence report as Markdown (e.g. -m NET_REPORT.md)",
     ),
 ) -> None:
-    """Perform live network security intelligence, IP lookup, SSL/TLS, and HTTP security header audit."""
-    with console.status(f"[bold cyan]Running network security audit on {target}...[/bold cyan]"):
-        report = audit_network_target(target)
+    """Perform live IP lookup, DNS, SSL/TLS, or project-wide network footprint discovery."""
+    target = str(_unwrap_param(target, "."))
+    markdown_output = _unwrap_param(markdown_output, None)
+
+    is_project = target == "." or Path(target).is_dir()
+    msg = (
+        f"Auditing project network footprint in {target}..."
+        if is_project
+        else f"Running network security audit on {target}..."
+    )
+    with console.status(f"[bold cyan]{msg}[/bold cyan]"):
+        report = (
+            audit_project_network(Path(target))
+            if is_project
+            else audit_network_target(target)
+        )
 
     print_network_report(report)
 
     if markdown_output:
         out = export_network_markdown_report(report, markdown_output)
         console.print(f"[bold green]Network intelligence report saved to: [cyan]{out}[/cyan][/bold green]\n")
+
+
+@app.command("eval")
+def eval_command(
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="AI model name to benchmark (e.g. openai/gpt-oss-120b, llama3.3:70b)",
+    ),
+    base_url: str | None = typer.Option(
+        None,
+        "--base-url",
+        help="OpenAI-compatible inference endpoint URL",
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="API key for custom model endpoint",
+    ),
+    no_ai: bool = typer.Option(
+        False,
+        "--no-ai",
+        help="Evaluate offline deterministic heuristic baseline",
+    ),
+    compare: str | None = typer.Option(
+        None,
+        "--compare",
+        help="Comma-separated list of models to benchmark side-by-side (e.g. --compare 'gpt-oss-120b,llama3.3:70b')",
+    ),
+    markdown_output: Path | None = typer.Option(
+        None,
+        "--markdown",
+        "-m",
+        help="Export benchmark report to Markdown (e.g. -m BENCHMARK.md)",
+    ),
+) -> None:
+    """Benchmark an AI model or compare multiple models side-by-side on ground-truth security cases."""
+    model = _unwrap_param(model, None)
+    base_url = _unwrap_param(base_url, None)
+    api_key = _unwrap_param(api_key, None)
+    no_ai = bool(_unwrap_param(no_ai, False))
+    compare = _unwrap_param(compare, None)
+    markdown_output = _unwrap_param(markdown_output, None)
+
+    if compare:
+        model_list = [m.strip() for m in compare.split(",") if m.strip()]
+        console.print(
+            f"\n[bold cyan]Running side-by-side benchmark comparison for {len(model_list)} models...[/bold cyan]"
+        )
+        leaderboard = run_multi_model_benchmark(models=model_list, base_url=base_url, api_key=api_key)
+        print_model_comparison_table(leaderboard)
+        if markdown_output:
+            export_benchmark_markdown(leaderboard, markdown_output)
+            console.print(f"[bold green]Comparative benchmark exported to: [cyan]{markdown_output}[/cyan][/bold green]\n")
+    else:
+        target_model = model or (settings.LLM_MODEL if not no_ai else "Offline Heuristic (No AI)")
+        console.print(f"\n[bold cyan]Benchmarking model: [green]{target_model}[/green]...[/bold cyan]")
+        scorecard = run_model_benchmark(model=model, base_url=base_url, api_key=api_key, no_ai=no_ai)
+        print_benchmark_scorecard(scorecard)
+        if markdown_output:
+            export_benchmark_markdown(scorecard, markdown_output)
+            console.print(f"[bold green]Benchmark scorecard exported to: [cyan]{markdown_output}[/cyan][/bold green]\n")
+
+
+rules_app = typer.Typer(
+    name="rules",
+    help="Inspect and test declarative security rules catalog.",
+    no_args_is_help=False,
+)
+app.add_typer(rules_app, name="rules")
+
+
+@rules_app.callback(invoke_without_command=True)
+def rules_callback(
+    ctx: typer.Context,
+    category: str | None = typer.Option(
+        None,
+        "--category",
+        "-c",
+        help="Filter by category (e.g. SECRET_EXPOSURE, INJECTION)",
+    ),
+) -> None:
+    """Inspect and test declarative security rules catalog. Defaults to listing active rules."""
+    category = _unwrap_param(category, None)
+    if ctx.invoked_subcommand is None:
+        list_rules(category=category)
+
+
+@rules_app.command("list")
+def list_rules(
+    category: str | None = typer.Option(
+        None,
+        "--category",
+        "-c",
+        help="Filter by category (e.g. SECRET_EXPOSURE, INJECTION)",
+    ),
+) -> None:
+    """List all loaded security rules from catalog and workspace configuration."""
+    category = _unwrap_param(category, None)
+    mgr = RuleManager()
+    rules = mgr.all_rules
+    if category:
+        rules = [r for r in rules if r.category.value.lower() == category.lower()]
+
+    table = Table(
+        title=f"CRY Declarative Security Rules Catalog ({len(rules)} active rules)",
+        border_style="cyan",
+        expand=True,
+    )
+    table.add_column("Rule ID", style="bold cyan", width=28)
+    table.add_column("Rule Name", style="bold", width=32)
+    table.add_column("Category", width=18)
+    table.add_column("Severity", width=10)
+    table.add_column("CWE", width=10)
+    table.add_column("Languages", style="dim")
+
+    for r in rules:
+        sev_color = (
+            "red"
+            if r.severity.value == "CRITICAL"
+            else ("yellow" if r.severity.value == "HIGH" else "cyan")
+        )
+        langs = ", ".join(r.languages) if r.languages else "*"
+        table.add_row(
+            r.rule_id,
+            r.name,
+            r.category.value,
+            f"[{sev_color}]{r.severity.value}[/{sev_color}]",
+            r.cwe_id or "-",
+            langs,
+        )
+
+    console.print(table)
+    console.print()
+
+
+@rules_app.command("test")
+def test_rules() -> None:
+    """Test all loaded rules for valid regex compilation and test sample matches."""
+    mgr = RuleManager()
+    with console.status("[bold cyan]Validating security rules and regex patterns...[/bold cyan]"):
+        results = mgr.test_rules()
+
+    console.print()
+    if not results["failed_rules"]:
+        console.print(
+            f"[bold green]✅ All {results['total_rules']} declarative security rules compiled and validated successfully![/bold green]\n"
+        )
+    else:
+        console.print(f"[bold red]❌ {len(results['failed_rules'])} rule(s) failed validation:[/bold red]")
+        for f in results["failed_rules"]:
+            console.print(f"  • [yellow]{f['id']}[/yellow]: {f['error']}")
+        console.print()
 
 
 def _execute_scan(

@@ -239,11 +239,16 @@ class TriageEngine:
                 total_raw_findings=0,
             )
 
-        # 1. Extract context for each finding
+        # 1. Extract context and AST structural context graph for each finding
+        from cry.triage.context_graph import build_context_graph
+
         findings_with_context: list[tuple[Finding, str | None]] = []
+        context_graphs: list[str] = []
         for f in findings:
             ctx = extract_code_context(target_dir, f.file_path, f.line_start)
+            cg = build_context_graph(target_dir, f.file_path, f.line_start)
             findings_with_context.append((f, ctx))
+            context_graphs.append(cg.format_for_llm_prompt())
 
         # 2. If client is not configured, fall back to heuristic baseline
         if not self.client.is_configured:
@@ -255,6 +260,10 @@ class TriageEngine:
             findings_with_context[i : i + chunk_size]
             for i in range(0, len(findings_with_context), chunk_size)
         ]
+        batch_cg_slices = [
+            context_graphs[i : i + chunk_size]
+            for i in range(0, len(context_graphs), chunk_size)
+        ]
 
         finding_map = {f.id: f for f in findings}
         blockers: list[TriagedFinding] = []
@@ -263,8 +272,9 @@ class TriageEngine:
         total_usage = TokenUsage()
         llm_errors: list[str] = []
 
-        for batch in batches:
-            user_prompt = build_triage_user_prompt(batch)
+        for idx, batch in enumerate(batches):
+            cg_slice = batch_cg_slices[idx] if idx < len(batch_cg_slices) else None
+            user_prompt = build_triage_user_prompt(batch, context_graphs=cg_slice)
             try:
                 data, usage = await self.client.chat_completion_json(
                     system_prompt=TRIAGE_SYSTEM_PROMPT,
@@ -398,7 +408,13 @@ class TriageEngine:
         for f in findings:
             in_test_file = _is_test_file(f.file_path, target_dir)
 
-            if f.category == Category.SECRET_EXPOSURE and in_test_file:
+            if getattr(f, "confidence", 1.0) < 0.3:
+                status = TriageStatus.LIKELY_FALSE_POSITIVE
+                reasoning = (
+                    f"AST Taint Analysis ({f.title}): Parameter or argument is verified as a constant literal or sanitized upstream. "
+                    "No attacker-controlled untrusted input reaches the execution sink."
+                )
+            elif f.category == Category.SECRET_EXPOSURE and in_test_file:
                 status = TriageStatus.LIKELY_FALSE_POSITIVE
                 reasoning = (
                     f"Test/Mock Credential ({f.title}): Located inside a test or fixture directory ({f.file_path}). "

@@ -9,6 +9,7 @@ import math
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from cry.models import Category, Finding, Severity
 from cry.scanners.base import BaseScanner
@@ -268,6 +269,23 @@ def _is_in_safe_path(file_path: Path) -> bool:
     return bool(parts & LIKELY_SAFE_PATHS)
 
 
+_CACHED_CATALOG_RULES: list[Any] | None = None
+
+
+def _get_catalog_secret_rules(base_dir: Path) -> list[Any]:
+    """Load and cache external catalog secret rules."""
+    global _CACHED_CATALOG_RULES
+    if _CACHED_CATALOG_RULES is None:
+        try:
+            from cry.rules.manager import RuleManager
+
+            mgr = RuleManager(workspace_dir=base_dir)
+            _CACHED_CATALOG_RULES = mgr.get_secret_rules()
+        except Exception:
+            _CACHED_CATALOG_RULES = []
+    return _CACHED_CATALOG_RULES
+
+
 def _should_skip_file(file_path: Path, max_size_mb: int = 5) -> bool:
     """Determine if a file should be skipped based on directory, extension, or size."""
     # Skip directories
@@ -309,6 +327,10 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
+        return findings
+
+    # Skip self-flagging of scanner rules or catalog definitions
+    if file_path.name in ("secrets.py", "secrets.toml", "sast.toml", "sast.py") and "cry" in file_path.parts:
         return findings
 
     lines = content.splitlines()
@@ -377,6 +399,38 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                     raw_evidence=f"Matched rule: {rule_name}",
                 )
                 findings.append(finding)
+
+        # Check external declarative secret rules (Supabase, HuggingFace, Slack, Twilio, etc.)
+        for ext_rule in _get_catalog_secret_rules(base_dir):
+            if any(f.line_start == line_num for f in findings):
+                break
+            for pat in ext_rule.compile_patterns():
+                ext_match = pat.search(line)
+                if ext_match:
+                    secret_val = ext_match.group(0)
+                    if any(p in secret_val.lower() for p in PLACEHOLDER_KEYWORDS):
+                        continue
+                    env_var = ext_rule.name.upper().replace(" ", "_").replace("-", "_")
+                    fix = f"const KEY = process.env.{env_var};" if is_js else f'KEY = os.environ["{env_var}"]'
+                    findings.append(
+                        Finding(
+                            id=f"secret-{uuid.uuid4().hex[:12]}",
+                            tool="cry-secrets",
+                            title=ext_rule.name,
+                            description=f"{ext_rule.description} {'(In test/mock directory).' if _is_in_safe_path(file_path) else ''}",
+                            category=Category.SECRET_EXPOSURE,
+                            severity=ext_rule.severity,
+                            file_path=relative_path,
+                            line_start=line_num,
+                            line_end=line_num,
+                            code_snippet=_redact_line(line.strip(), secret_val),
+                            cwe_id=ext_rule.cwe_id,
+                            fix_hint=ext_rule.fix_hint,
+                            suggested_fix=ext_rule.suggested_fix or fix,
+                            raw_evidence=f"Matched external rule: {ext_rule.rule_id}",
+                        )
+                    )
+                    break
 
         # Check for unclassified high-entropy tokens
         entropy_match = re.search(
