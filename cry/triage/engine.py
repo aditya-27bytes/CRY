@@ -1,6 +1,7 @@
 """Triage engine: coordinates code context extraction, LLM reasoning, and verdict reporting."""
 
 from pathlib import Path
+from typing import Any
 
 from cry.models import (
     Category,
@@ -215,6 +216,29 @@ def _generate_fallback_replacement_code(f: Finding) -> str | None:
     return None
 
 
+def extract_llm_triage_results(data: Any) -> list[dict[str, Any]]:
+    """Extract individual finding triage records from LLM response whether formatted as list or dict."""
+    raw_results: list[Any]
+    if isinstance(data, list):
+        raw_results = data
+    elif isinstance(data, dict):
+        candidate = (
+            data.get("triage_results")
+            or data.get("findings")
+            or data.get("results")
+            or ([data] if "finding_id" in data else [])
+        )
+        raw_results = candidate if isinstance(candidate, list) else []
+    else:
+        raw_results = []
+
+    return [
+        item
+        for item in raw_results
+        if isinstance(item, dict) and isinstance(item.get("finding_id"), str) and item.get("finding_id")
+    ]
+
+
 class TriageEngine:
     """Orchestrates security finding triage using code context and LLM analysis."""
 
@@ -285,11 +309,11 @@ class TriageEngine:
                 total_usage.total_tokens += usage.total_tokens
                 total_usage.estimated_cost_usd += usage.estimated_cost_usd
 
-                raw_results = data.get("triage_results", [])
-                batch_triaged_ids = set()
+                triaged_items = extract_llm_triage_results(data)
+                batch_triaged_ids: set[str] = set()
 
-                for item in raw_results:
-                    fid = item.get("finding_id")
+                for item in triaged_items:
+                    fid = str(item["finding_id"])
                     finding = finding_map.get(fid)
                     if not finding:
                         continue

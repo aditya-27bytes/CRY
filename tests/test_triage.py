@@ -117,3 +117,44 @@ def test_llm_client_is_configured_logic() -> None:
         base_url="https://api.groq.com/openai/v1", api_key="gsk_actual_key_12345"
     )
     assert configured_cloud.is_configured is True
+
+
+import pytest
+
+@pytest.mark.asyncio
+async def test_triage_handles_top_level_list_response() -> None:
+    """TriageEngine must gracefully process responses whether the LLM returns a dict or top-level list."""
+    from unittest.mock import AsyncMock
+    from cry.models import TokenUsage
+
+    mock_client = LLMClient(base_url="http://localhost:11434/v1")
+    # Simulate LLM returning a raw list instead of {"triage_results": [...]}
+    mock_client.chat_completion_json = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [
+                {
+                    "finding_id": "f-list-1",
+                    "status": "CONFIRMED_BLOCKER",
+                    "exploitability_reasoning": "Real exploit path",
+                    "plain_english_explanation": "Critical flaw",
+                    "fix_recommendation": "Sanitize parameter",
+                }
+            ],
+            TokenUsage(prompt_tokens=50, completion_tokens=30, total_tokens=80),
+        )
+    )
+
+    finding = Finding(
+        id="f-list-1",
+        tool="cry-sast",
+        title="SQL Injection",
+        description="Raw SQL concat",
+        category=Category.INJECTION,
+        severity=Severity.CRITICAL,
+    )
+
+    engine = TriageEngine(client=mock_client)
+    report = await engine.triage_findings([finding], FIXTURES_DIR)
+    assert report.verdict == Verdict.DONT_SHIP
+    assert len(report.blockers) == 1
+    assert report.blockers[0].finding.id == "f-list-1"
