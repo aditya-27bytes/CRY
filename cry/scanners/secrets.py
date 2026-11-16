@@ -330,7 +330,10 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
         return findings
 
     # Skip self-flagging of scanner rules or catalog definitions
-    if file_path.name in ("secrets.py", "secrets.toml", "sast.toml", "sast.py") and "cry" in file_path.parts:
+    if (
+        file_path.name in ("secrets.py", "secrets.toml", "sast.toml", "sast.py")
+        and "cry" in file_path.parts
+    ):
         return findings
 
     lines = content.splitlines()
@@ -374,10 +377,14 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
 
                 env_name = rule_name.upper().replace(" ", "_").replace("-", "_")
                 if is_js:
-                    fix_hint = f"Load credential from environment variables via process.env.{env_name}."
+                    fix_hint = (
+                        f"Load credential from environment variables via process.env.{env_name}."
+                    )
                     suggested_fix = f"const API_KEY = process.env.{env_name};"
                 else:
-                    fix_hint = f"Load credential from environment variables via os.environ['{env_name}']."
+                    fix_hint = (
+                        f"Load credential from environment variables via os.environ['{env_name}']."
+                    )
                     suggested_fix = f'API_KEY = os.environ["{env_name}"]'
 
                 # Build the finding
@@ -411,7 +418,11 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                     if any(p in secret_val.lower() for p in PLACEHOLDER_KEYWORDS):
                         continue
                     env_var = ext_rule.name.upper().replace(" ", "_").replace("-", "_")
-                    fix = f"const KEY = process.env.{env_var};" if is_js else f'KEY = os.environ["{env_var}"]'
+                    fix = (
+                        f"const KEY = process.env.{env_var};"
+                        if is_js
+                        else f'KEY = os.environ["{env_var}"]'
+                    )
                     findings.append(
                         Finding(
                             id=f"secret-{uuid.uuid4().hex[:12]}",

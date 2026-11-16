@@ -13,7 +13,9 @@ from cry.scanners.network import (
 def test_detects_cloud_metadata_ip_leak(tmp_path: Path) -> None:
     """Ensure hardcoded 169.254.169.254 triggers a critical finding."""
     sample_file = tmp_path / "metadata_service.py"
-    sample_file.write_text('METADATA_URL = "http://169.254.169.254/latest/meta-data/"\n', encoding="utf-8")
+    sample_file.write_text(
+        'METADATA_URL = "http://169.254.169.254/latest/meta-data/"\n', encoding="utf-8"
+    )
 
     findings = scan_file_network(sample_file, tmp_path)
     assert len(findings) >= 1
@@ -26,7 +28,9 @@ def test_detects_cloud_metadata_ip_leak(tmp_path: Path) -> None:
 def test_detects_plaintext_http_api_call(tmp_path: Path) -> None:
     """Ensure unencrypted remote HTTP API endpoints are flagged."""
     sample_file = tmp_path / "api_client.py"
-    sample_file.write_text('API_ENDPOINT = "http://api.paymentprovider.com/v1/charge"\n', encoding="utf-8")
+    sample_file.write_text(
+        'API_ENDPOINT = "http://api.paymentprovider.com/v1/charge"\n', encoding="utf-8"
+    )
 
     findings = scan_file_network(sample_file, tmp_path)
     assert len(findings) == 1
@@ -38,7 +42,9 @@ def test_detects_plaintext_http_api_call(tmp_path: Path) -> None:
 def test_detects_ssrf_request_sink(tmp_path: Path) -> None:
     """Ensure HTTP calls taking raw user input are flagged for SSRF."""
     sample_file = tmp_path / "proxy.py"
-    sample_file.write_text("def proxy_view(req):\n    return requests.get(req.query.target_url)\n", encoding="utf-8")
+    sample_file.write_text(
+        "def proxy_view(req):\n    return requests.get(req.query.target_url)\n", encoding="utf-8"
+    )
 
     findings = scan_file_network(sample_file, tmp_path)
     assert len(findings) >= 1

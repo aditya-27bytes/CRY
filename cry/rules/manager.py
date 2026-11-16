@@ -13,7 +13,9 @@ CATALOG_DIR = Path(__file__).parent / "catalog"
 class RuleManager:
     """Discovers, loads, and indexes security rules from embedded and custom sources."""
 
-    def __init__(self, workspace_dir: Path | None = None, extra_dirs: list[Path] | None = None) -> None:
+    def __init__(
+        self, workspace_dir: Path | None = None, extra_dirs: list[Path] | None = None
+    ) -> None:
         self.workspace_dir = workspace_dir or Path.cwd()
         self.extra_dirs = extra_dirs or []
         self._rules: list[RuleDefinition] = []
@@ -76,7 +78,9 @@ class RuleManager:
             try:
                 patterns = rule.compile_patterns()
                 if not patterns:
-                    results["failed_rules"].append({"id": rule.rule_id, "error": "No patterns specified"})
+                    results["failed_rules"].append(
+                        {"id": rule.rule_id, "error": "No patterns specified"}
+                    )
                     continue
 
                 # Run positive test samples if present
@@ -91,7 +95,10 @@ class RuleManager:
                 for neg in rule.test_negative:
                     if any(p.search(neg) for p in patterns):
                         results["failed_rules"].append(
-                            {"id": rule.rule_id, "error": f"Failed negative test match (unwanted match): '{neg}'"}
+                            {
+                                "id": rule.rule_id,
+                                "error": f"Failed negative test match (unwanted match): '{neg}'",
+                            }
                         )
                         break
 

@@ -19,7 +19,9 @@ from cry.triage.client import LLMClient
 from cry.triage.engine import TriageEngine
 from evals.schema import BenchmarkCase
 
-DEFAULT_DATASET = Path(__file__).resolve().parent.parent.parent / "evals" / "datasets" / "ground_truth.json"
+DEFAULT_DATASET = (
+    Path(__file__).resolve().parent.parent.parent / "evals" / "datasets" / "ground_truth.json"
+)
 DEFAULT_SAMPLES = Path(__file__).resolve().parent.parent.parent / "evals" / "datasets" / "samples"
 
 
@@ -61,11 +63,7 @@ def run_model_benchmark(
     cases = load_ground_truth(dataset_path)
 
     # 1. Run live scanners on benchmark sample files across SAST, Secrets, and Network
-    raw_findings = (
-        scan_secrets(samples)
-        + scan_sast(samples)
-        + scan_network_code_patterns(samples)
-    )
+    raw_findings = scan_secrets(samples) + scan_sast(samples) + scan_network_code_patterns(samples)
 
     # 2. Run Triage
     start_time = time.time()
@@ -79,6 +77,7 @@ def run_model_benchmark(
             base_url=effective_base_url,
             api_key=effective_api_key,
             model=effective_model,
+            fallback_models=[],  # In benchmark mode, strictly evaluate the requested model
         )
         triage = TriageEngine(client=client)
         try:
@@ -170,7 +169,9 @@ def export_benchmark_markdown(
         else [scorecard_or_leaderboard]
     )
 
-    lines.append("| Model | Precision | Recall (Sensitivity) | F1 Score | False Negatives | Latency | Total Cost ($) |")
+    lines.append(
+        "| Model | Precision | Recall (Sensitivity) | F1 Score | False Negatives | Latency | Total Cost ($) |"
+    )
     lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     for c in cards:
@@ -192,9 +193,15 @@ def export_benchmark_markdown(
 
     lines.append("")
     lines.append("### Metric Definitions:")
-    lines.append("- **Recall (Sensitivity)**: Percentage of real vulnerabilities successfully detected. (Target: > 95%)")
-    lines.append("- **False Negatives**: Real vulnerabilities that were completely missed. (**Must be 0**)")
-    lines.append("- **Precision**: Percentage of flagged issues that are genuinely dangerous. (Target: > 85%)")
+    lines.append(
+        "- **Recall (Sensitivity)**: Percentage of real vulnerabilities successfully detected. (Target: > 95%)"
+    )
+    lines.append(
+        "- **False Negatives**: Real vulnerabilities that were completely missed. (**Must be 0**)"
+    )
+    lines.append(
+        "- **Precision**: Percentage of flagged issues that are genuinely dangerous. (Target: > 85%)"
+    )
     lines.append("- **F1 Score**: Harmonic mean balancing precision and recall.")
 
     output_path.write_text("\n".join(lines), encoding="utf-8")

@@ -53,7 +53,9 @@ def scan_gitignore_protection(root_dir: Path) -> list[Finding]:
     gitignore_path = root_dir / ".gitignore"
 
     # Find any .env files in root or immediate subdirectories
-    env_files = [f for f in root_dir.glob(".env*") if f.is_file() and not f.name.endswith(".example")]
+    env_files = [
+        f for f in root_dir.glob(".env*") if f.is_file() and not f.name.endswith(".example")
+    ]
 
     if not env_files:
         return findings
@@ -80,7 +82,11 @@ def scan_gitignore_protection(root_dir: Path) -> list[Finding]:
         return findings
 
     gitignore_text = gitignore_path.read_text(encoding="utf-8", errors="ignore")
-    lines = [line.strip() for line in gitignore_text.splitlines() if line.strip() and not line.startswith("#")]
+    lines = [
+        line.strip()
+        for line in gitignore_text.splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
 
     if not any(pattern in lines for pattern in (".env", "*.env", ".env*")):
         findings.append(
@@ -125,7 +131,11 @@ def scan_sensitive_files(root_dir: Path) -> list[Finding]:
             except Exception:
                 continue
 
-            if "PRIVATE KEY" in first_bytes or "private_key" in first_bytes or "client_secret" in first_bytes:
+            if (
+                "PRIVATE KEY" in first_bytes
+                or "private_key" in first_bytes
+                or "client_secret" in first_bytes
+            ):
                 findings.append(
                     Finding(
                         id=f"cfg-{uuid.uuid4().hex[:12]}",
@@ -172,7 +182,9 @@ def scan_docker_security(root_dir: Path) -> list[Finding]:
 
                 # Hardcoded secrets in ENV
                 if line.upper().startswith("ENV ") and re.search(
-                    r"\b(?:api[_-]?key|secret|password|token)\s*=\s*['\"]?[a-zA-Z0-9_\-]{8,}", line, re.IGNORECASE
+                    r"\b(?:api[_-]?key|secret|password|token)\s*=\s*['\"]?[a-zA-Z0-9_\-]{8,}",
+                    line,
+                    re.IGNORECASE,
                 ):
                     findings.append(
                         Finding(

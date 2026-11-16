@@ -187,12 +187,18 @@ def analyze_taint_in_javascript(content: str, target_line: int) -> TaintResult |
     for p_line in preceding_lines:
         line_clean = p_line.strip()
         # Look for: const x = req.query.y
-        m = re.search(r"(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(req\.(?:query|params|body)[a-zA-Z0-9_$.?\[\]]*)", line_clean)
+        m = re.search(
+            r"(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(req\.(?:query|params|body)[a-zA-Z0-9_$.?\[\]]*)",
+            line_clean,
+        )
         if m:
             tainted_map[m.group(1)] = m.group(2)
 
         # Look for sanitization e.g. DOMPurify.sanitize, parseInt, validator
-        m_san = re.search(r"(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:DOMPurify\.sanitize|parseInt|Number|encodeURIComponent)\s*\(", line_clean)
+        m_san = re.search(
+            r"(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:DOMPurify\.sanitize|parseInt|Number|encodeURIComponent)\s*\(",
+            line_clean,
+        )
         if m_san:
             sanitized_vars.add(m_san.group(1))
 

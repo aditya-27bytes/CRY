@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 from cry.models import (
     Category,
@@ -119,42 +120,375 @@ def test_llm_client_is_configured_logic() -> None:
     assert configured_cloud.is_configured is True
 
 
-import pytest
+def test_extract_llm_triage_results_handles_all_shapes() -> None:
+    """Triage parser must handle top-level list, dict wrappers, single findings, and invalid inputs."""
+    from cry.triage.engine import extract_llm_triage_results
 
-@pytest.mark.asyncio
-async def test_triage_handles_top_level_list_response() -> None:
-    """TriageEngine must gracefully process responses whether the LLM returns a dict or top-level list."""
-    from unittest.mock import AsyncMock
-    from cry.models import TokenUsage
+    # 1. Top-level list response (e.g. from gpt-oss-120b or Ollama)
+    raw_list = [
+        {"finding_id": "f-1", "status": "CONFIRMED_BLOCKER"},
+        {"finding_id": "f-2", "status": "WARNING"},
+    ]
+    assert extract_llm_triage_results(raw_list) == raw_list
 
-    mock_client = LLMClient(base_url="http://localhost:11434/v1")
-    # Simulate LLM returning a raw list instead of {"triage_results": [...]}
-    mock_client.chat_completion_json = AsyncMock(  # type: ignore[method-assign]
-        return_value=(
-            [
-                {
-                    "finding_id": "f-list-1",
-                    "status": "CONFIRMED_BLOCKER",
-                    "exploitability_reasoning": "Real exploit path",
-                    "plain_english_explanation": "Critical flaw",
-                    "fix_recommendation": "Sanitize parameter",
-                }
-            ],
-            TokenUsage(prompt_tokens=50, completion_tokens=30, total_tokens=80),
+    # 2. Standard dict with 'triage_results' key
+    dict_results = {"triage_results": [{"finding_id": "f-1", "status": "CONFIRMED_BLOCKER"}]}
+    assert extract_llm_triage_results(dict_results) == [
+        {"finding_id": "f-1", "status": "CONFIRMED_BLOCKER"}
+    ]
+
+    # 3. Dict with 'findings' key
+    dict_findings = {"findings": [{"finding_id": "f-3", "status": "LIKELY_FALSE_POSITIVE"}]}
+    assert extract_llm_triage_results(dict_findings) == [
+        {"finding_id": "f-3", "status": "LIKELY_FALSE_POSITIVE"}
+    ]
+
+    # 4. Dict with 'results' key
+    dict_alt = {"results": [{"finding_id": "f-4", "status": "WARNING"}]}
+    assert extract_llm_triage_results(dict_alt) == [{"finding_id": "f-4", "status": "WARNING"}]
+
+    # 5. Single item dict without wrapper
+    single_item = {"finding_id": "f-5", "status": "CONFIRMED_BLOCKER"}
+    assert extract_llm_triage_results(single_item) == [single_item]
+
+    # 6. Malformed entries filtered out cleanly
+    malformed_list = [
+        None,
+        "not a dict",
+        {"no_finding_id": True},
+        {"finding_id": "", "status": "IGNORED"},
+        {"finding_id": "f-valid", "status": "CONFIRMED_BLOCKER"},
+    ]
+    assert extract_llm_triage_results(malformed_list) == [
+        {"finding_id": "f-valid", "status": "CONFIRMED_BLOCKER"}
+    ]
+
+    # 7. Non-iterable / empty values
+    assert extract_llm_triage_results(None) == []
+    assert extract_llm_triage_results("raw string") == []
+    assert extract_llm_triage_results(12345) == []
+
+
+def test_settings_get_fallback_candidates() -> None:
+    """Settings must provide prioritized alternative models excluding current active model."""
+    from cry.config import settings
+
+    # Groq endpoint fallback candidates
+    groq_fallbacks = settings.get_fallback_candidates(
+        base_url="https://api.groq.com/openai/v1", current_model="openai/gpt-oss-120b"
+    )
+    assert "openai/gpt-oss-120b" not in groq_fallbacks
+    assert "qwen/qwen3.8-27b" in groq_fallbacks
+    assert "llama-3.1-8b-instant" in groq_fallbacks
+
+    # OpenAI endpoint fallback candidates
+    openai_fallbacks = settings.get_fallback_candidates(
+        base_url="https://api.openai.com/v1", current_model="gpt-4o"
+    )
+    assert "gpt-4o" not in openai_fallbacks
+    assert "gpt-4o-mini" in openai_fallbacks
+
+
+def _run_coroutine_sync(coro: Any) -> Any:
+    """Synchronously execute a coroutine without requiring an asyncio event loop or socket connections."""
+    stack = [coro]
+    result = None
+    while stack:
+        try:
+            val = stack[-1].send(result)
+            if hasattr(val, "send"):
+                stack.append(val)
+                result = None
+            else:
+                result = val
+        except StopIteration as e:
+            stack.pop()
+            result = e.value
+    return result
+
+
+def test_llm_client_dynamic_model_failover_on_429() -> None:
+    """Client must dynamically fail over to fallback model when primary model hits HTTP 429 rate limit."""
+    import httpx
+
+    client = LLMClient(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="gsk_test_mock_12345",
+        model="openai/gpt-oss-120b",
+        fallback_models=["qwen/qwen3.8-27b"],
+        max_retries=1,
+    )
+
+    req_count = 0
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        nonlocal req_count
+        req_count += 1
+        model_sent = payload.get("model", "")
+        if model_sent == "openai/gpt-oss-120b":
+            # Primary model hits rate limit
+            return httpx.Response(
+                status_code=429,
+                headers={"retry-after": "1"},
+                json={"error": {"message": "Rate limit exceeded (TPM)"}},
+                request=httpx.Request("POST", url),
+            )
+        else:
+            # Fallback model succeeds
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "choices": [{"message": {"content": '{"triage_results": []}'}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                },
+                request=httpx.Request("POST", url),
+            )
+
+    client._send_request = mock_send  # type: ignore[assignment]
+    data, usage = _run_coroutine_sync(
+        client.chat_completion_json(system_prompt="sys", user_prompt="user")
+    )
+
+    assert data == {"triage_results": []}
+    assert client.model == "qwen/qwen3.8-27b"  # Model updated to working fallback
+    assert len(client.switched_models_log) > 0
+    assert "openai/gpt-oss-120b" in client.switched_models_log[0]
+    assert req_count == 2
+
+
+def test_llm_client_dynamic_model_failover_on_404() -> None:
+    """Client must drop decommissioned model on HTTP 404 and fail over seamlessly."""
+    import httpx
+
+    client = LLMClient(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="gsk_test_mock_12345",
+        model="retired/legacy-model-v1",
+        fallback_models=["openai/gpt-oss-120b"],
+        max_retries=1,
+    )
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        model_sent = payload.get("model", "")
+        if "retired" in model_sent:
+            return httpx.Response(
+                status_code=404,
+                json={"error": {"message": "Model not found"}},
+                request=httpx.Request("POST", url),
+            )
+        return httpx.Response(
+            status_code=200,
+            json={
+                "choices": [{"message": {"content": '{"triage_results": []}'}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 6, "total_tokens": 18},
+            },
+            request=httpx.Request("POST", url),
         )
+
+    client._send_request = mock_send  # type: ignore[assignment]
+    data, usage = _run_coroutine_sync(
+        client.chat_completion_json(system_prompt="sys", user_prompt="user")
     )
 
-    finding = Finding(
-        id="f-list-1",
-        tool="cry-sast",
-        title="SQL Injection",
-        description="Raw SQL concat",
-        category=Category.INJECTION,
-        severity=Severity.CRITICAL,
+    assert data == {"triage_results": []}
+    assert client.model == "openai/gpt-oss-120b"
+    assert len(client.switched_models_log) > 0
+
+
+def test_llm_client_retry_round_after_all_models_throttled() -> None:
+    """Client must wait and retry on round 2 without raising UnboundLocalError when round 1 throttles."""
+    from unittest.mock import patch
+
+    import httpx
+
+    client = LLMClient(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="gsk_test_mock_12345",
+        model="llama-3.1-8b-instant",
+        fallback_models=[],  # No alternative models, forces retry round
+        max_retries=1,
     )
 
-    engine = TriageEngine(client=mock_client)
-    report = await engine.triage_findings([finding], FIXTURES_DIR)
+    attempt = 0
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            # Round 0: 429 rate limit
+            return httpx.Response(
+                status_code=429,
+                headers={"retry-after": "0.01"},
+                json={"error": {"message": "Rate limit reached"}},
+                request=httpx.Request("POST", url),
+            )
+        # Round 1: success
+        return httpx.Response(
+            status_code=200,
+            json={
+                "choices": [{"message": {"content": '{"triage_results": []}'}}],
+                "usage": {"prompt_tokens": 15, "completion_tokens": 8, "total_tokens": 23},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client._send_request = mock_send  # type: ignore[assignment]
+    with patch("asyncio.sleep", return_value=None):
+        data, usage = _run_coroutine_sync(
+            client.chat_completion_json(system_prompt="sys", user_prompt="user")
+        )
+
+    assert data == {"triage_results": []}
+    assert attempt == 2
+
+
+def test_smart_hybrid_routing_partitions_secrets_and_test_mocks() -> None:
+    """Smart routing must deterministically triage secrets and test fixtures, forwarding only app SAST to LLM."""
+    import httpx
+
+    client = LLMClient(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="gsk_mock_test_key",
+        model="llama-3.1-8b-instant",
+    )
+
+    llm_call_count = 0
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        nonlocal llm_call_count
+        llm_call_count += 1
+        # The LLM should only receive finding f-real-sast
+        return httpx.Response(
+            status_code=200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "triage_results": [
+                                        {
+                                            "finding_id": "f-real-sast",
+                                            "status": "CONFIRMED_BLOCKER",
+                                            "exploitability_reasoning": "Live unescaped SQL concat",
+                                            "plain_english_explanation": "Critical SQL injection",
+                                            "fix_recommendation": "Use parameter binding",
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client._send_request = mock_send  # type: ignore[assignment]
+    engine = TriageEngine(client=client)
+
+    findings = [
+        # 1. Real Secret in production code -> Deterministic CONFIRMED_BLOCKER
+        Finding(
+            id="f-prod-secret",
+            tool="cry-secrets",
+            title="Stripe Key",
+            description="Live key",
+            category=Category.SECRET_EXPOSURE,
+            severity=Severity.CRITICAL,
+            file_path="src/config.py",
+            line_start=1,
+        ),
+        # 2. Mock Secret in test file -> Deterministic LIKELY_FALSE_POSITIVE
+        Finding(
+            id="f-test-secret",
+            tool="cry-secrets",
+            title="Stripe Key",
+            description="Test key",
+            category=Category.SECRET_EXPOSURE,
+            severity=Severity.CRITICAL,
+            file_path="tests/fixtures/test_env.py",
+            line_start=1,
+        ),
+        # 3. Test SAST finding -> Deterministic LIKELY_FALSE_POSITIVE
+        Finding(
+            id="f-test-sast",
+            tool="cry-sast",
+            title="Mock SQLi",
+            description="SQL in mock",
+            category=Category.INJECTION,
+            severity=Severity.HIGH,
+            file_path="tests/mock_db.py",
+            line_start=1,
+        ),
+        # 4. Real SAST finding in app code -> Must be routed to LLM
+        Finding(
+            id="f-real-sast",
+            tool="cry-sast",
+            title="SQL Injection",
+            description="SQL flaw in routes",
+            category=Category.INJECTION,
+            severity=Severity.CRITICAL,
+            file_path="src/routes/users.py",
+            line_start=1,
+        ),
+    ]
+
+    report = _run_coroutine_sync(engine.triage_findings(findings, target_dir=Path(".")))
+
+    # Verify LLM was invoked exactly once for the single real app flaw
+    assert llm_call_count == 1
+    assert report.total_raw_findings == 4
+    assert len(report.blockers) == 2  # f-prod-secret (deterministic) + f-real-sast (LLM)
+    assert len(report.warnings) == 2  # f-test-secret + f-test-sast (non-blocking test advisories)
     assert report.verdict == Verdict.DONT_SHIP
-    assert len(report.blockers) == 1
-    assert report.blockers[0].finding.id == "f-list-1"
+
+
+def test_test_fixtures_only_yield_warning_not_dont_ship() -> None:
+    """Findings located exclusively in test/mock/fixture directories must never block deployment."""
+    engine = TriageEngine(client=LLMClient(api_key=""))
+    findings = [
+        Finding(
+            id="f-fixture-sql",
+            tool="cry-sast",
+            title="SQL Injection",
+            description="SQL in fixture",
+            category=Category.INJECTION,
+            severity=Severity.CRITICAL,
+            file_path="tests/fixtures/vulnerable_app.py",
+            line_start=18,
+        ),
+        Finding(
+            id="f-fixture-secret",
+            tool="cry-secrets",
+            title="Stripe Key",
+            description="Dummy Stripe Key",
+            category=Category.SECRET_EXPOSURE,
+            severity=Severity.CRITICAL,
+            file_path="tests/fixtures/vulnerable_app.py",
+            line_start=9,
+        ),
+    ]
+
+    # Offline heuristic evaluation
+    heuristic_report = engine._heuristic_fallback(findings, target_dir=Path("."))
+    assert len(heuristic_report.blockers) == 0
+    assert len(heuristic_report.warnings) == 2
+    assert heuristic_report.verdict == Verdict.FIX_FIRST
+    assert "TEST/MOCK WARNINGS" in heuristic_report.summary
+
+    # Async smart hybrid triage evaluation
+    ai_report = _run_coroutine_sync(engine.triage_findings(findings, target_dir=Path(".")))
+    assert len(ai_report.blockers) == 0
+    assert len(ai_report.warnings) == 2
+    assert ai_report.verdict == Verdict.FIX_FIRST
+    assert "TEST/MOCK WARNINGS" in ai_report.summary

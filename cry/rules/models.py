@@ -10,7 +10,9 @@ from cry.models import Category, Severity
 class RuleDefinition(BaseModel):
     """Declarative definition of a security rule for SAST or Secrets scanning."""
 
-    rule_id: str = Field(description="Unique rule identifier (e.g. gitleaks-supabase-key, sast-react-xss)")
+    rule_id: str = Field(
+        description="Unique rule identifier (e.g. gitleaks-supabase-key, sast-react-xss)"
+    )
     name: str = Field(description="Human readable name")
     category: Category = Field(default=Category.OTHER)
     severity: Severity = Field(default=Severity.HIGH)

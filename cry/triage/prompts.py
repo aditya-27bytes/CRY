@@ -78,4 +78,3 @@ def build_triage_user_prompt(
         lines.append("")
 
     return "\n".join(lines)
-

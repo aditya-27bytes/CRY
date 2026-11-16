@@ -105,6 +105,9 @@ class TriagedFinding(BaseModel):
     suggested_replacement_code: str | None = Field(
         default=None, description="Exact code diff or replacement snippet"
     )
+    triaged_by_model: str | None = Field(
+        default=None, description="Model identifier that triaged this finding"
+    )
 
 
 class TokenUsage(BaseModel):
@@ -136,6 +139,13 @@ class VerdictReport(BaseModel):
     # Telemetry & Performance
     scan_duration_seconds: float = 0.0
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    model_used: str | None = Field(
+        default=None, description="Active AI model used for triage analysis"
+    )
+    model_switches: list[str] = Field(
+        default_factory=list,
+        description="Record of model failovers/switches due to rate limits or availability",
+    )
 
 
 class ModelBenchmarkScorecard(BaseModel):

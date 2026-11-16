@@ -1,5 +1,6 @@
 """Triage engine: coordinates code context extraction, LLM reasoning, and verdict reporting."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ def extract_code_context(
     base_dir: Path,
     file_path_str: str | None,
     line_start: int | None,
-    context_lines: int = 10,
+    context_lines: int = 6,
 ) -> str | None:
     """Read +/- context_lines surrounding the flagged line."""
     if not file_path_str or line_start is None:
@@ -54,14 +55,104 @@ def extract_code_context(
     return "\n".join(snippet_lines)
 
 
+TEST_DIR_NAMES: set[str] = {
+    "test",
+    "tests",
+    "testing",
+    "testdata",
+    "test-data",
+    "mock",
+    "mocks",
+    "__mocks__",
+    "fixture",
+    "fixtures",
+    "__fixtures__",
+    "spec",
+    "specs",
+    "__specs__",
+    "__tests__",
+    "sample",
+    "samples",
+    "example",
+    "examples",
+    "demo",
+    "demos",
+    "eval",
+    "evals",
+    "benchmark",
+    "benchmarks",
+    "benches",
+    "cypress",
+    "playwright",
+    "e2e",
+}
+
+TEST_FILE_PREFIXES: tuple[str, ...] = (
+    "test_",
+    "mock_",
+    "fake_",
+    "dummy_",
+    "stub_",
+    "sample_",
+)
+
+TEST_FILE_SUFFIXES: tuple[str, ...] = (
+    "_test.py",
+    "_spec.rb",
+    "_test.go",
+    "_test.rs",
+    "tests.rs",
+    ".test.ts",
+    ".spec.ts",
+    ".test.js",
+    ".spec.js",
+    ".test.tsx",
+    ".spec.tsx",
+    ".test.jsx",
+    ".spec.jsx",
+    ".test.mjs",
+    ".test.cjs",
+    ".mock.ts",
+    ".mock.js",
+)
+
+TEST_FILE_EXACT: set[str] = {
+    "conftest.py",
+    "vulnerable_app.py",
+    "safe_app.py",
+    "test_env.py",
+    "mock_server.py",
+}
+
+
 def _is_test_file(file_path_str: str | None, base_dir: Path | None = None) -> bool:
-    """Check if file lives under a test, mock, fixture, or sample directory."""
+    """Check if file lives under a test, mock, fixture, or sample directory or matches test naming patterns."""
     if not file_path_str:
         return False
     p = Path(file_path_str)
-    full_path = (base_dir / p) if (base_dir and not p.is_absolute()) else p
-    parts = {part.lower() for part in full_path.parts}
-    return bool(parts & {"test", "tests", "mock", "mocks", "fixture", "fixtures", "evals", "samples"})
+    name_lower = p.name.lower()
+
+    # 1. Exact or prefix/suffix filename match
+    if name_lower in TEST_FILE_EXACT:
+        return True
+    if name_lower.startswith(TEST_FILE_PREFIXES):
+        return True
+    if name_lower.endswith(TEST_FILE_SUFFIXES):
+        return True
+
+    # 2. Check relative file path within scanned repository
+    rel_parts = {part.lower() for part in p.parts}
+    if bool(rel_parts & TEST_DIR_NAMES):
+        return True
+
+    # 3. Check full resolved path if base_dir provided
+    if base_dir:
+        full_path = p if p.is_absolute() else base_dir / p
+        parts = {part.lower() for part in full_path.parts}
+        if bool(parts & TEST_DIR_NAMES):
+            return True
+
+    return False
 
 
 def _generate_deep_heuristic_reasoning(f: Finding) -> str:
@@ -69,7 +160,12 @@ def _generate_deep_heuristic_reasoning(f: Finding) -> str:
     title_lower = f.title.lower()
     cwe = f.cwe_id or "CWE-General"
 
-    if f.category == Category.SECRET_EXPOSURE or "secret" in title_lower or "key" in title_lower or "token" in title_lower:
+    if (
+        f.category == Category.SECRET_EXPOSURE
+        or "secret" in title_lower
+        or "key" in title_lower
+        or "token" in title_lower
+    ):
         return (
             f"Threat Vector: Automated GitHub crawlers and malicious bots scan public/private commits and runtime bundles for {f.title}. "
             "Attacker Impact: Immediate full credential compromise, allowing unauthenticated API requests, financial loss (via billing exhaustion), "
@@ -139,7 +235,11 @@ def _generate_deep_heuristic_reasoning(f: Finding) -> str:
             f"({cwe})."
         )
 
-    if f.category == Category.INSECURE_DEPENDENCY or "package" in title_lower or "depend" in title_lower:
+    if (
+        f.category == Category.INSECURE_DEPENDENCY
+        or "package" in title_lower
+        or "depend" in title_lower
+    ):
         return (
             f"Threat Vector: Vulnerable or untrusted upstream dependency ({f.title}). "
             "Attacker Impact: Supply-chain compromise, remote code execution during build or runtime, or unauthorized data exfiltration. "
@@ -175,9 +275,18 @@ def _generate_actionable_fix(f: Finding) -> str:
         return "Use parameterized queries or ORM abstractions. Never concatenate or interpolate raw user variables into query strings."
     if "command" in title_lower or "shell" in title_lower:
         return "Execute commands with a fixed argument array (subprocess.run with shell=False or child_process.execFile). Avoid shell interpreters."
-    if "secret" in title_lower or "key" in title_lower or "token" in title_lower or f.category == Category.SECRET_EXPOSURE:
+    if (
+        "secret" in title_lower
+        or "key" in title_lower
+        or "token" in title_lower
+        or f.category == Category.SECRET_EXPOSURE
+    ):
         return "Remove hardcoded secret from repository, revoke the exposed key immediately in your provider console, and inject via environment variables."
-    if f.category == Category.INSECURE_DEPENDENCY or "package" in title_lower or "depend" in title_lower:
+    if (
+        f.category == Category.INSECURE_DEPENDENCY
+        or "package" in title_lower
+        or "depend" in title_lower
+    ):
         return "Upgrade the vulnerable library to the patched version specified in the advisory and pin dependency versions."
     if "gitignore" in title_lower or ".env" in title_lower:
         return "Add .env and sensitive environment files to .gitignore immediately and rotate any exposed keys."
@@ -206,13 +315,27 @@ def _generate_fallback_replacement_code(f: Finding) -> str | None:
     is_js = ext in {".ts", ".tsx", ".js", ".jsx"}
     title_lower = f.title.lower()
     if "sql" in title_lower:
-        return 'await db.query("SELECT * FROM items WHERE id = $1", [itemId]);' if is_js else 'cursor.execute("SELECT * FROM items WHERE id = %s", (item_id,))'
+        return (
+            'await db.query("SELECT * FROM items WHERE id = $1", [itemId]);'
+            if is_js
+            else 'cursor.execute("SELECT * FROM items WHERE id = %s", (item_id,))'
+        )
     if "secret" in title_lower or "token" in title_lower or f.category == Category.SECRET_EXPOSURE:
-        return 'const API_KEY = process.env.API_KEY;' if is_js else 'API_KEY = os.environ["API_KEY"]'
+        return (
+            "const API_KEY = process.env.API_KEY;" if is_js else 'API_KEY = os.environ["API_KEY"]'
+        )
     if "command" in title_lower:
-        return 'execFile("ping", ["-c", "1", host], callback);' if is_js else 'subprocess.run(["ping", "-c", "1", host], capture_output=True, check=True)'
+        return (
+            'execFile("ping", ["-c", "1", host], callback);'
+            if is_js
+            else 'subprocess.run(["ping", "-c", "1", host], capture_output=True, check=True)'
+        )
     if "eval" in title_lower:
-        return 'const data = JSON.parse(userInput);' if is_js else 'import json\ndata = json.loads(user_input)'
+        return (
+            "const data = JSON.parse(userInput);"
+            if is_js
+            else "import json\ndata = json.loads(user_input)"
+        )
     return None
 
 
@@ -235,7 +358,9 @@ def extract_llm_triage_results(data: Any) -> list[dict[str, Any]]:
     return [
         item
         for item in raw_results
-        if isinstance(item, dict) and isinstance(item.get("finding_id"), str) and item.get("finding_id")
+        if isinstance(item, dict)
+        and isinstance(item.get("finding_id"), str)
+        and item.get("finding_id")
     ]
 
 
@@ -266,93 +391,202 @@ class TriageEngine:
         # 1. Extract context and AST structural context graph for each finding
         from cry.triage.context_graph import build_context_graph
 
-        findings_with_context: list[tuple[Finding, str | None]] = []
-        context_graphs: list[str] = []
-        for f in findings:
-            ctx = extract_code_context(target_dir, f.file_path, f.line_start)
-            cg = build_context_graph(target_dir, f.file_path, f.line_start)
-            findings_with_context.append((f, ctx))
-            context_graphs.append(cg.format_for_llm_prompt())
-
-        # 2. If client is not configured, fall back to heuristic baseline
-        if not self.client.is_configured:
-            return self._heuristic_fallback(findings, target_dir)
-
-        # 3. Query LLM in chunks of at most 5 findings to guarantee maximum depth
-        chunk_size = 5
-        batches = [
-            findings_with_context[i : i + chunk_size]
-            for i in range(0, len(findings_with_context), chunk_size)
-        ]
-        batch_cg_slices = [
-            context_graphs[i : i + chunk_size]
-            for i in range(0, len(context_graphs), chunk_size)
-        ]
-
         finding_map = {f.id: f for f in findings}
         blockers: list[TriagedFinding] = []
         warnings: list[TriagedFinding] = []
         likely_false_positives: list[TriagedFinding] = []
+
+        llm_findings_with_context: list[tuple[Finding, str | None]] = []
+        llm_context_graphs: list[str] = []
+
+        for f in findings:
+            ctx = extract_code_context(target_dir, f.file_path, f.line_start)
+            cg = build_context_graph(target_dir, f.file_path, f.line_start)
+            in_test_file = _is_test_file(f.file_path, target_dir)
+
+            # SMART HYBRID ROUTING RULE 1: Secret exposures
+            # High-entropy cryptographic secrets or API keys are deterministic.
+            # Avoid sending sensitive credentials or tokens over cloud APIs.
+            if f.category == Category.SECRET_EXPOSURE or f.tool == "cry-secrets":
+                if in_test_file:
+                    warnings.append(
+                        TriagedFinding(
+                            finding=f,
+                            status=TriageStatus.WARNING,
+                            exploitability_reasoning=(
+                                f"Test/Mock Credential Advisory ({f.title}): Located inside test, mock, or fixture file ({f.file_path}). "
+                                "This credential is not active in production runtime traffic and does not block release. "
+                                "Ensure test artifacts, mock fixtures, and synthetic credentials are excluded from production build artifacts and Docker images."
+                            ),
+                            plain_english_explanation=f.description,
+                            fix_recommendation=_generate_actionable_fix(f),
+                            suggested_replacement_code=_generate_fallback_replacement_code(f),
+                            triaged_by_model="CRY Scope Intelligence Engine",
+                        )
+                    )
+                else:
+                    blockers.append(
+                        TriagedFinding(
+                            finding=f,
+                            status=TriageStatus.CONFIRMED_BLOCKER,
+                            exploitability_reasoning=_generate_deep_heuristic_reasoning(f),
+                            plain_english_explanation=f.description,
+                            fix_recommendation=_generate_actionable_fix(f),
+                            suggested_replacement_code=_generate_fallback_replacement_code(f),
+                            triaged_by_model="CRY Deterministic Security Engine",
+                        )
+                    )
+                continue
+
+            # SMART HYBRID ROUTING RULE 2: Obvious test/mock fixture findings
+            if in_test_file:
+                warnings.append(
+                    TriagedFinding(
+                        finding=f,
+                        status=TriageStatus.WARNING,
+                        exploitability_reasoning=(
+                            f"Test/Mock Fixture Advisory ({f.title}): Detected inside test, mock, or sample directory ({f.file_path}). "
+                            "This code is not exposed to untrusted public production routes and does not block release. "
+                            "Ensure test directories and mock fixtures are excluded from production container images."
+                        ),
+                        plain_english_explanation=f.description,
+                        fix_recommendation=_generate_actionable_fix(f),
+                        suggested_replacement_code=_generate_fallback_replacement_code(f),
+                        triaged_by_model="CRY Scope Intelligence Engine",
+                    )
+                )
+                continue
+
+            # SMART HYBRID ROUTING RULE 3: AST Taint analysis proven benign constant literals
+            if cg.taint_analysis and cg.taint_analysis.is_literal_constant:
+                likely_false_positives.append(
+                    TriagedFinding(
+                        finding=f,
+                        status=TriageStatus.LIKELY_FALSE_POSITIVE,
+                        exploitability_reasoning=(
+                            f"AST Dataflow Proof ({f.title}): Parameter or argument is verified as a constant literal. "
+                            "No attacker-controlled untrusted input reaches the execution sink."
+                        ),
+                        plain_english_explanation=f.description,
+                        fix_recommendation="No fix required; constant string literal verified by AST parser.",
+                        suggested_replacement_code=None,
+                        triaged_by_model="CRY AST Dataflow Engine",
+                    )
+                )
+                continue
+
+            # All real application vulnerabilities in production code require LLM deep reasoning
+            llm_findings_with_context.append((f, ctx))
+            llm_context_graphs.append(cg.format_for_llm_prompt())
+
         total_usage = TokenUsage()
         llm_errors: list[str] = []
 
-        for idx, batch in enumerate(batches):
-            cg_slice = batch_cg_slices[idx] if idx < len(batch_cg_slices) else None
-            user_prompt = build_triage_user_prompt(batch, context_graphs=cg_slice)
-            try:
-                data, usage = await self.client.chat_completion_json(
-                    system_prompt=TRIAGE_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                )
-                total_usage.prompt_tokens += usage.prompt_tokens
-                total_usage.completion_tokens += usage.completion_tokens
-                total_usage.total_tokens += usage.total_tokens
-                total_usage.estimated_cost_usd += usage.estimated_cost_usd
+        if llm_findings_with_context and self.client.is_configured:
+            # Query LLM in chunks of at most 4 findings for maximum depth without token blowout
+            chunk_size = 4
+            batches = [
+                llm_findings_with_context[i : i + chunk_size]
+                for i in range(0, len(llm_findings_with_context), chunk_size)
+            ]
+            batch_cg_slices = [
+                llm_context_graphs[i : i + chunk_size]
+                for i in range(0, len(llm_context_graphs), chunk_size)
+            ]
 
-                triaged_items = extract_llm_triage_results(data)
-                batch_triaged_ids: set[str] = set()
+            for idx, batch in enumerate(batches):
+                if idx > 0 and not self.client.is_local:
+                    await asyncio.sleep(0.35)
 
-                for item in triaged_items:
-                    fid = str(item["finding_id"])
-                    finding = finding_map.get(fid)
-                    if not finding:
-                        continue
-
-                    batch_triaged_ids.add(fid)
-                    status_str = item.get("status", TriageStatus.NEEDS_MANUAL_REVIEW.value)
-                    try:
-                        status = TriageStatus(status_str)
-                    except ValueError:
-                        status = TriageStatus.NEEDS_MANUAL_REVIEW
-
-                    triaged = TriagedFinding(
-                        finding=finding,
-                        status=status,
-                        exploitability_reasoning=item.get("exploitability_reasoning")
-                        or _generate_deep_heuristic_reasoning(finding),
-                        plain_english_explanation=item.get(
-                            "plain_english_explanation", finding.description
-                        ),
-                        fix_recommendation=item.get("fix_recommendation")
-                        or _generate_actionable_fix(finding),
-                        suggested_replacement_code=item.get("suggested_replacement_code")
-                        or _generate_fallback_replacement_code(finding),
+                cg_slice = batch_cg_slices[idx] if idx < len(batch_cg_slices) else None
+                user_prompt = build_triage_user_prompt(batch, context_graphs=cg_slice)
+                try:
+                    data, usage = await self.client.chat_completion_json(
+                        system_prompt=TRIAGE_SYSTEM_PROMPT,
+                        user_prompt=user_prompt,
                     )
+                    total_usage.prompt_tokens += usage.prompt_tokens
+                    total_usage.completion_tokens += usage.completion_tokens
+                    total_usage.total_tokens += usage.total_tokens
+                    total_usage.estimated_cost_usd += usage.estimated_cost_usd
 
-                    if status == TriageStatus.CONFIRMED_BLOCKER:
-                        blockers.append(triaged)
-                    elif status in (TriageStatus.WARNING, TriageStatus.NEEDS_MANUAL_REVIEW):
-                        warnings.append(triaged)
-                    elif status == TriageStatus.LIKELY_FALSE_POSITIVE:
-                        likely_false_positives.append(triaged)
+                    triaged_items = extract_llm_triage_results(data)
+                    batch_triaged_ids: set[str] = set()
 
-                # Fallback for any items in batch missed by LLM
-                for f, _ in batch:
-                    if f.id not in batch_triaged_ids:
+                    for item in triaged_items:
+                        fid = str(item["finding_id"])
+                        finding = finding_map.get(fid)
+                        if not finding:
+                            continue
+
+                        batch_triaged_ids.add(fid)
+                        status_str = item.get("status", TriageStatus.NEEDS_MANUAL_REVIEW.value)
+                        try:
+                            status = TriageStatus(status_str)
+                        except ValueError:
+                            status = TriageStatus.NEEDS_MANUAL_REVIEW
+
+                        triaged = TriagedFinding(
+                            finding=finding,
+                            status=status,
+                            exploitability_reasoning=item.get("exploitability_reasoning")
+                            or _generate_deep_heuristic_reasoning(finding),
+                            plain_english_explanation=item.get(
+                                "plain_english_explanation", finding.description
+                            ),
+                            fix_recommendation=item.get("fix_recommendation")
+                            or _generate_actionable_fix(finding),
+                            suggested_replacement_code=item.get("suggested_replacement_code")
+                            or _generate_fallback_replacement_code(finding),
+                            triaged_by_model=self.client.model,
+                        )
+
+                        if status == TriageStatus.CONFIRMED_BLOCKER:
+                            if _is_test_file(finding.file_path, target_dir):
+                                triaged.status = TriageStatus.WARNING
+                                triaged.exploitability_reasoning = (
+                                    f"[Test Scope Advisory]: Non-blocking warning. Finding is in test/mock file ({finding.file_path}). "
+                                    + triaged.exploitability_reasoning
+                                )
+                                warnings.append(triaged)
+                            else:
+                                blockers.append(triaged)
+                        elif status in (TriageStatus.WARNING, TriageStatus.NEEDS_MANUAL_REVIEW):
+                            warnings.append(triaged)
+                        elif status == TriageStatus.LIKELY_FALSE_POSITIVE:
+                            likely_false_positives.append(triaged)
+
+                    # Fallback for any items in batch missed by LLM
+                    for f, _ in batch:
+                        if f.id not in batch_triaged_ids:
+                            f_in_test = _is_test_file(f.file_path, target_dir)
+                            default_status = (
+                                TriageStatus.WARNING
+                                if f_in_test or f.severity != Severity.CRITICAL
+                                else TriageStatus.CONFIRMED_BLOCKER
+                            )
+                            fallback_triaged = TriagedFinding(
+                                finding=f,
+                                status=default_status,
+                                exploitability_reasoning=_generate_deep_heuristic_reasoning(f),
+                                plain_english_explanation=f.description,
+                                fix_recommendation=_generate_actionable_fix(f),
+                                suggested_replacement_code=_generate_fallback_replacement_code(f),
+                                triaged_by_model="CRY Heuristic Fallback",
+                            )
+                            if default_status == TriageStatus.CONFIRMED_BLOCKER:
+                                blockers.append(fallback_triaged)
+                            else:
+                                warnings.append(fallback_triaged)
+
+                except LLMClientError as e:
+                    llm_errors.append(str(e))
+                    for f, _ in batch:
+                        f_in_test = _is_test_file(f.file_path, target_dir)
                         default_status = (
-                            TriageStatus.CONFIRMED_BLOCKER
-                            if f.severity == Severity.CRITICAL
-                            else TriageStatus.WARNING
+                            TriageStatus.WARNING
+                            if f_in_test or f.severity != Severity.CRITICAL
+                            else TriageStatus.CONFIRMED_BLOCKER
                         )
                         fallback_triaged = TriagedFinding(
                             finding=f,
@@ -361,47 +595,59 @@ class TriageEngine:
                             plain_english_explanation=f.description,
                             fix_recommendation=_generate_actionable_fix(f),
                             suggested_replacement_code=_generate_fallback_replacement_code(f),
+                            triaged_by_model="CRY Heuristic Fallback",
                         )
                         if default_status == TriageStatus.CONFIRMED_BLOCKER:
                             blockers.append(fallback_triaged)
                         else:
                             warnings.append(fallback_triaged)
 
-            except LLMClientError as e:
-                llm_errors.append(str(e))
-                # Fall back to heuristic for this batch
-                for f, _ in batch:
-                    default_status = (
-                        TriageStatus.CONFIRMED_BLOCKER
-                        if f.severity == Severity.CRITICAL
-                        else TriageStatus.WARNING
-                    )
-                    fallback_triaged = TriagedFinding(
-                        finding=f,
-                        status=default_status,
-                        exploitability_reasoning=_generate_deep_heuristic_reasoning(f),
-                        plain_english_explanation=f.description,
-                        fix_recommendation=_generate_actionable_fix(f),
-                        suggested_replacement_code=_generate_fallback_replacement_code(f),
-                    )
-                    if default_status == TriageStatus.CONFIRMED_BLOCKER:
-                        blockers.append(fallback_triaged)
-                    else:
-                        warnings.append(fallback_triaged)
+        elif llm_findings_with_context and not self.client.is_configured:
+            # Client not configured: triage remaining candidates with heuristic
+            for f, _ in llm_findings_with_context:
+                f_in_test = _is_test_file(f.file_path, target_dir)
+                default_status = (
+                    TriageStatus.WARNING
+                    if f_in_test or f.severity != Severity.CRITICAL
+                    else TriageStatus.CONFIRMED_BLOCKER
+                )
+                fallback_triaged = TriagedFinding(
+                    finding=f,
+                    status=default_status,
+                    exploitability_reasoning=_generate_deep_heuristic_reasoning(f),
+                    plain_english_explanation=f.description,
+                    fix_recommendation=_generate_actionable_fix(f),
+                    suggested_replacement_code=_generate_fallback_replacement_code(f),
+                    triaged_by_model="CRY Heuristic Engine",
+                )
+                if default_status == TriageStatus.CONFIRMED_BLOCKER:
+                    blockers.append(fallback_triaged)
+                else:
+                    warnings.append(fallback_triaged)
 
         # 4. Determine final verdict
         if blockers:
             final_verdict = Verdict.DONT_SHIP
             summary = (
-                f"🚨 DEPLOYMENT BLOCKED: Discovered {len(blockers)} critical security blocker(s) "
+                f"🚨 DEPLOYMENT BLOCKED: Discovered {len(blockers)} critical production security blocker(s) "
                 f"and {len(warnings)} warning(s). Immediate remediation required before release."
             )
         elif warnings:
             final_verdict = Verdict.FIX_FIRST
-            summary = (
-                f"⚠️ CAUTION (FIX FIRST): No critical blockers detected, but found {len(warnings)} security warning(s). "
-                "Remediate these vulnerabilities before deploying to production."
+            all_test_warnings = all(
+                _is_test_file(w.finding.file_path, target_dir) for w in warnings
             )
+            if all_test_warnings:
+                summary = (
+                    f"⚠️ CAUTION (TEST/MOCK WARNINGS): No critical production blockers detected. "
+                    f"Found {len(warnings)} non-blocking test/fixture warning(s). "
+                    "Ensure test directories and mock fixtures are excluded from production build artifacts and Docker images."
+                )
+            else:
+                summary = (
+                    f"⚠️ CAUTION (FIX FIRST): No critical blockers detected, but found {len(warnings)} security warning(s). "
+                    "Remediate these vulnerabilities before deploying to production."
+                )
         else:
             final_verdict = Verdict.SHIP
             summary = (
@@ -412,6 +658,11 @@ class TriageEngine:
         if llm_errors:
             summary += f" (Note: Partial AI fallback occurred: {llm_errors[0]})"
 
+        if llm_findings_with_context and self.client.is_configured:
+            active_model_desc = f"{self.client.model} (Smart Hybrid Routing)"
+        else:
+            active_model_desc = "CRY Smart Hybrid Engine (Deterministic Triage)"
+
         return VerdictReport(
             verdict=final_verdict,
             summary=summary,
@@ -421,6 +672,8 @@ class TriageEngine:
             warnings=warnings,
             likely_false_positives=likely_false_positives,
             token_usage=total_usage,
+            model_used=active_model_desc,
+            model_switches=list(self.client.switched_models_log),
         )
 
     def _heuristic_fallback(self, findings: list[Finding], target_dir: Path) -> VerdictReport:
@@ -438,11 +691,12 @@ class TriageEngine:
                     f"AST Taint Analysis ({f.title}): Parameter or argument is verified as a constant literal or sanitized upstream. "
                     "No attacker-controlled untrusted input reaches the execution sink."
                 )
-            elif f.category == Category.SECRET_EXPOSURE and in_test_file:
-                status = TriageStatus.LIKELY_FALSE_POSITIVE
+            elif in_test_file:
+                status = TriageStatus.WARNING
                 reasoning = (
-                    f"Test/Mock Credential ({f.title}): Located inside a test or fixture directory ({f.file_path}). "
-                    "This is not active in production runtime traffic, but should still be verified and excluded from build artifacts."
+                    f"Test/Mock Scope Advisory ({f.title}): Located inside test, mock, or fixture path ({f.file_path}). "
+                    "This finding does not execute in production runtime traffic and will not block deployment. "
+                    "Verify that test artifacts, mock fixtures, and synthetic credentials are excluded from production container images and release packages."
                 )
             elif f.severity == Severity.CRITICAL:
                 status = TriageStatus.CONFIRMED_BLOCKER
@@ -473,16 +727,26 @@ class TriageEngine:
         if blockers:
             verdict = Verdict.DONT_SHIP
             summary = (
-                f"🚨 DEPLOYMENT BLOCKED: Discovered {len(blockers)} critical security blocker(s) and {len(warnings)} warning(s). "
+                f"🚨 DEPLOYMENT BLOCKED: Discovered {len(blockers)} critical production security blocker(s) and {len(warnings)} warning(s). "
                 "Your application contains active vulnerabilities that expose credentials or allow arbitrary command/database execution. "
                 "Review the replacement code in the Blockers table below and resolve them before shipping."
             )
         elif warnings:
             verdict = Verdict.FIX_FIRST
-            summary = (
-                f"⚠️ CAUTION (FIX FIRST): No critical blockers detected, but found {len(warnings)} security warning(s). "
-                "These issues weaken your application's defense-in-depth and should be remediated before production rollout."
+            all_test_warnings = all(
+                _is_test_file(w.finding.file_path, target_dir) for w in warnings
             )
+            if all_test_warnings:
+                summary = (
+                    f"⚠️ CAUTION (TEST/MOCK WARNINGS): No critical production blockers detected. "
+                    f"Found {len(warnings)} non-blocking test/fixture warning(s). "
+                    "Ensure test directories and mock fixtures are excluded from production build artifacts and Docker images."
+                )
+            else:
+                summary = (
+                    f"⚠️ CAUTION (FIX FIRST): No critical blockers detected, but found {len(warnings)} security warning(s). "
+                    "These issues weaken your application's defense-in-depth and should be remediated before production rollout."
+                )
         else:
             verdict = Verdict.SHIP
             summary = (
@@ -498,4 +762,5 @@ class TriageEngine:
             blockers=blockers,
             warnings=warnings,
             likely_false_positives=likely_false_positives,
+            model_used="Offline Heuristic Engine",
         )

@@ -1,15 +1,33 @@
-# Intentionally vulnerable Python file for testing CRY scanners
-# DO NOT use this in production — it exists solely as a test fixture.
+# ==============================================================================
+# CRY SYNTHETIC TEST FIXTURE — STRICTLY FOR AUTOMATED TESTING & BENCHMARKS
+# ==============================================================================
+# ⚠️ DO NOT USE IN PRODUCTION — THIS FILE CONTAINS INTENTIONALLY INSECURE CODE.
+#
+# IMPORTANT NOTICE REGARDING CREDENTIALS & SECRETS:
+# • NONE of the secret keys, tokens, or credentials below are genuine or active.
+# • All credential strings are standard public synthetic examples from official
+#   documentation (e.g. AWS documentation sample AKIA key format and
+#   official Stripe documentation test key formats).
+# • PRODUCTION SECURITY RULE: In real applications, secrets and credentials must
+#   NEVER be hardcoded in source files. Always store genuine secrets in a
+#   gitignored '.env' file or a cloud secret manager (AWS Secrets Manager,
+#   GCP Secret Manager, HashiCorp Vault).
+# ==============================================================================
 
 import os
 import pickle
 import subprocess
 
-# ── Secret Exposure ──
+# ── Secret Exposure (Synthetic Mock Fixtures for Unit Testing) ──
+# Synthetic Stripe test fixture from Stripe API documentation examples:
 STRIPE_KEY = "sk_live_4eC39HqLyjWDarjtT1zdp7dc"
+# Synthetic AWS Access Key fixture from AWS documentation examples:
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+# Synthetic OpenAI API key format fixture:
 OPENAI_KEY = "sk-proj-abc123def456ghi789jklmnop"
+# Synthetic mock database connection string fixture:
 DATABASE_URL = "postgres://admin:supersecretpass@db.example.com:5432/myapp"
+# Synthetic mock password variable fixture:
 password = "my_production_password_2024"
 
 

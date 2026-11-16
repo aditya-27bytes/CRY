@@ -5,7 +5,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-48%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-54%20passed-brightgreen.svg)]()
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Type Checked](https://img.shields.io/badge/types-mypy-blue.svg)](http://mypy-lang.org/)
 
@@ -255,7 +255,7 @@ Current baseline metrics:
 ## 🧪 Running Automated Tests
 
 ```bash
-# Run full pytest test suite (48 passing unit tests)
+# Run full pytest test suite (54 passing unit tests)
 pytest -v
 
 # Run linter and type checker

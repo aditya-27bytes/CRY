@@ -31,16 +31,24 @@ class ContextGraph:
         if self.taint_analysis:
             if self.taint_analysis.is_tainted:
                 chain = " -> ".join(self.taint_analysis.dataflow_chain) or "Direct"
-                sections.append(f"AST Dataflow (CONFIRMED TAINT, confidence={self.taint_analysis.confidence:.2f}): {chain}")
+                sections.append(
+                    f"AST Dataflow (CONFIRMED TAINT, confidence={self.taint_analysis.confidence:.2f}): {chain}"
+                )
             elif self.taint_analysis.is_literal_constant:
-                sections.append(f"AST Dataflow (BENIGN CONSTANT, confidence={self.taint_analysis.confidence:.2f}): {self.taint_analysis.explanation}")
+                sections.append(
+                    f"AST Dataflow (BENIGN CONSTANT, confidence={self.taint_analysis.confidence:.2f}): {self.taint_analysis.explanation}"
+                )
             elif self.taint_analysis.sanitizer:
-                sections.append(f"AST Dataflow (SANITIZED, confidence={self.taint_analysis.confidence:.2f}): {self.taint_analysis.explanation}")
+                sections.append(
+                    f"AST Dataflow (SANITIZED, confidence={self.taint_analysis.confidence:.2f}): {self.taint_analysis.explanation}"
+                )
 
         return "\n".join(sections) if sections else "No special AST graph available."
 
 
-def build_context_graph(base_dir: Path, file_path_str: str | None, line_num: int | None) -> ContextGraph:
+def build_context_graph(
+    base_dir: Path, file_path_str: str | None, line_num: int | None
+) -> ContextGraph:
     """Analyze the file around line_num to construct a structural ContextGraph."""
     if not file_path_str or line_num is None:
         return ContextGraph(file_path=file_path_str or "", target_line=line_num or 0)
@@ -60,7 +68,16 @@ def build_context_graph(base_dir: Path, file_path_str: str | None, line_num: int
 
     # 1. Detect Security Imports
     sec_libs = []
-    for pattern in ("dompurify", "helmet", "csurf", "bcrypt", "argon2", "shlex", "secrets", "validator"):
+    for pattern in (
+        "dompurify",
+        "helmet",
+        "csurf",
+        "bcrypt",
+        "argon2",
+        "shlex",
+        "secrets",
+        "validator",
+    ):
         if pattern in content.lower():
             sec_libs.append(pattern)
     if sec_libs:
@@ -78,7 +95,11 @@ def build_context_graph(base_dir: Path, file_path_str: str | None, line_num: int
                     if start <= line_num <= end:
                         graph.enclosing_function = f"def {node.name}({ast.unparse(node.args) if hasattr(ast, 'unparse') else '...'})"
                         if node.decorator_list:
-                            decs = [ast.unparse(d) for d in node.decorator_list if hasattr(ast, "unparse")]
+                            decs = [
+                                ast.unparse(d)
+                                for d in node.decorator_list
+                                if hasattr(ast, "unparse")
+                            ]
                             graph.route_decorator = ", ".join(decs)
                         break
         except Exception:
@@ -91,7 +112,10 @@ def build_context_graph(base_dir: Path, file_path_str: str | None, line_num: int
         # Find enclosing function
         for i in range(max(0, line_num - 25), line_num):
             line = lines[i].strip()
-            if re.search(r"(?:function\s+([a-zA-Z0-9_$]+)|(?:export\s+)?const\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s*)?\()", line):
+            if re.search(
+                r"(?:function\s+([a-zA-Z0-9_$]+)|(?:export\s+)?const\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s*)?\()",
+                line,
+            ):
                 graph.enclosing_function = line
             if re.search(r"(?:app|router)\.(?:get|post|put|delete|use)\s*\(", line):
                 graph.route_decorator = line

@@ -143,7 +143,10 @@ def scan_file_network(file_path: Path, base_dir: Path) -> list[Finding]:
         if http_match:
             endpoint = http_match.group(1)
             # Skip documentation links or schema URIs
-            if not any(skip_kw in line.lower() for skip_kw in ("doc", "xml", "w3.org", "json-schema", "xmlns")):
+            if not any(
+                skip_kw in line.lower()
+                for skip_kw in ("doc", "xml", "w3.org", "json-schema", "xmlns")
+            ):
                 findings.append(
                     Finding(
                         id=f"net-{uuid.uuid4().hex[:12]}",
@@ -303,7 +306,9 @@ def _clean_target_hostname(raw_target: str) -> str:
     return host.strip()
 
 
-def resolve_ip_and_dns(hostname: str) -> tuple[list[str], list[str], str | None, bool, bool, str | None]:
+def resolve_ip_and_dns(
+    hostname: str,
+) -> tuple[list[str], list[str], str | None, bool, bool, str | None]:
     """Resolve IPv4, IPv6, Reverse DNS PTR, and detect SSRF/private IP risks."""
     ipv4_list: list[str] = []
     ipv6_list: list[str] = []
@@ -331,10 +336,14 @@ def resolve_ip_and_dns(hostname: str) -> tuple[list[str], list[str], str | None,
             ip_obj = ipaddress.ip_address(ip_str)
             if ip_str == "169.254.169.254":
                 is_metadata = True
-                ssrf_warning = "CRITICAL SSRF RISK: Resolves to Cloud Instance Metadata IP (169.254.169.254)!"
+                ssrf_warning = (
+                    "CRITICAL SSRF RISK: Resolves to Cloud Instance Metadata IP (169.254.169.254)!"
+                )
             elif ip_obj.is_private or ip_obj.is_loopback:
                 is_private = True
-                ssrf_warning = f"HIGH SSRF RISK: Domain resolves to private or loopback IP range ({ip_str})!"
+                ssrf_warning = (
+                    f"HIGH SSRF RISK: Domain resolves to private or loopback IP range ({ip_str})!"
+                )
         except ValueError:
             continue
 
@@ -349,7 +358,9 @@ def resolve_ip_and_dns(hostname: str) -> tuple[list[str], list[str], str | None,
     return ipv4_list, ipv6_list, reverse_dns, is_private, is_metadata, ssrf_warning
 
 
-def inspect_ssl_certificate(hostname: str, port: int = 443, timeout: float = 5.0) -> SSLCertificateInfo | None:
+def inspect_ssl_certificate(
+    hostname: str, port: int = 443, timeout: float = 5.0
+) -> SSLCertificateInfo | None:
     """Connect via TLS socket and extract live certificate telemetry."""
     context = ssl.create_default_context()
     context.check_hostname = True
@@ -365,7 +376,9 @@ def inspect_ssl_certificate(hostname: str, port: int = 443, timeout: float = 5.0
 
             # Parse issuer
             issuer_dict = dict(x[0] for x in cert.get("issuer", ()))
-            issuer_name = issuer_dict.get("organizationName") or issuer_dict.get("commonName") or "Unknown"
+            issuer_name = (
+                issuer_dict.get("organizationName") or issuer_dict.get("commonName") or "Unknown"
+            )
 
             # Parse subject
             subject_dict = dict(x[0] for x in cert.get("subject", ()))
@@ -405,7 +418,9 @@ def inspect_ssl_certificate(hostname: str, port: int = 443, timeout: float = 5.0
         return None
 
 
-def audit_http_security_headers(target_url: str, timeout: float = 6.0) -> tuple[list[HeaderCheck], str]:
+def audit_http_security_headers(
+    target_url: str, timeout: float = 6.0
+) -> tuple[list[HeaderCheck], str]:
     """Probe target server and audit HTTP security defense headers."""
     checks: list[HeaderCheck] = []
     url = target_url if target_url.startswith("http") else f"https://{target_url}"
@@ -511,7 +526,9 @@ def audit_http_security_headers(target_url: str, timeout: float = 6.0) -> tuple[
 def audit_network_target(target: str) -> NetworkAuditReport:
     """Execute complete network, IP lookup, SSL/TLS, and security header audit."""
     hostname = _clean_target_hostname(target)
-    ipv4_list, ipv6_list, reverse_dns, is_private, is_metadata, ssrf_warning = resolve_ip_and_dns(hostname)
+    ipv4_list, ipv6_list, reverse_dns, is_private, is_metadata, ssrf_warning = resolve_ip_and_dns(
+        hostname
+    )
 
     if not ipv4_list and not ipv6_list:
         return NetworkAuditReport(

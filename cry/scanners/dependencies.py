@@ -136,7 +136,9 @@ def scan_package_json(file_path: Path, base_dir: Path) -> list[Finding]:
     if isinstance(scripts, dict):
         for script_name in ("preinstall", "install", "postinstall", "prepublish"):
             cmd = scripts.get(script_name, "")
-            if isinstance(cmd, str) and re.search(r"\b(?:curl|wget|nc|bash\s+-c|sh\s+-c|powershell)\b", cmd, re.IGNORECASE):
+            if isinstance(cmd, str) and re.search(
+                r"\b(?:curl|wget|nc|bash\s+-c|sh\s+-c|powershell)\b", cmd, re.IGNORECASE
+            ):
                 findings.append(
                     Finding(
                         id=f"dep-{uuid.uuid4().hex[:12]}",

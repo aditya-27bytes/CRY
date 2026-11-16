@@ -29,10 +29,21 @@ def print_verdict_report(report: VerdictReport) -> None:
         border_style = "green"
         headline = "[bold green]NO BLOCKERS FOUND — YOUR APP IS SAFE TO SHIP[/bold green]"
 
+    model_info = (
+        f"\n[bold]Triage Engine:[/bold] [cyan]{report.model_used}[/cyan]"
+        if report.model_used
+        else ""
+    )
+    failover_info = ""
+    if report.model_switches:
+        failover_info = "\n[bold yellow]⚡ Multi-Model Resilience:[/bold yellow]\n" + "\n".join(
+            f"  • [dim yellow]{sw}[/dim yellow]" for sw in report.model_switches
+        )
+
     console.print(
         Panel(
             f"{verdict_badge}  {headline}\n\n"
-            f"[bold]Target:[/bold] [cyan]{report.target}[/cyan]\n"
+            f"[bold]Target:[/bold] [cyan]{report.target}[/cyan]{model_info}{failover_info}\n"
             f"[bold]Summary:[/bold] {report.summary}",
             title="CRY Security Verdict",
             border_style=border_style,
@@ -209,7 +220,10 @@ def print_network_report(report: Any) -> None:
 
     # 2. IP & DNS Resolution Table
     ip_table = Table(
-        title="🌐 IP Resolution & DNS Intelligence", border_style="cyan", show_lines=True, expand=True
+        title="🌐 IP Resolution & DNS Intelligence",
+        border_style="cyan",
+        show_lines=True,
+        expand=True,
     )
     ip_table.add_column("Record Type", style="bold", width=20)
     ip_table.add_column("Resolved Value", style="cyan")
@@ -231,14 +245,18 @@ def print_network_report(report: Any) -> None:
     ip_table.add_row(
         "IPv6 (AAAA)",
         ipv6_str,
-        "[dim]IPv6 Dual-Stack Support[/dim]" if report.ipv6_addresses else "[yellow]No IPv6 record[/yellow]",
+        "[dim]IPv6 Dual-Stack Support[/dim]"
+        if report.ipv6_addresses
+        else "[yellow]No IPv6 record[/yellow]",
     )
 
     ptr_str = report.reverse_dns or "No PTR record found"
     ip_table.add_row(
         "Reverse DNS (PTR)",
         ptr_str,
-        "[green]Verified Canonical Host[/green]" if report.reverse_dns else "[dim]Unmapped PTR[/dim]",
+        "[green]Verified Canonical Host[/green]"
+        if report.reverse_dns
+        else "[dim]Unmapped PTR[/dim]",
     )
 
     console.print(ip_table)
@@ -284,7 +302,10 @@ def print_network_report(report: Any) -> None:
     # 4. HTTP Security Headers Table
     if report.security_headers:
         hdr_table = Table(
-            title="🛡️ HTTP Defense-in-Depth Security Headers", border_style="blue", show_lines=True, expand=True
+            title="🛡️ HTTP Defense-in-Depth Security Headers",
+            border_style="blue",
+            show_lines=True,
+            expand=True,
         )
         hdr_table.add_column("Security Header", style="bold", width=26)
         hdr_table.add_column("Status", width=14)
@@ -293,9 +314,7 @@ def print_network_report(report: Any) -> None:
         for h in report.security_headers:
             status_badge = "[green]✓ PRESENT[/green]" if h.present else "[red]✗ MISSING[/red]"
             val_or_rec = (
-                f"[green]{h.value}[/green]"
-                if h.present
-                else f"[yellow]{h.recommendation}[/yellow]"
+                f"[green]{h.value}[/green]" if h.present else f"[yellow]{h.recommendation}[/yellow]"
             )
             hdr_table.add_row(h.name, status_badge, val_or_rec)
 
@@ -356,14 +375,20 @@ def print_project_network_report(report: Any) -> None:
             warn = (
                 f"[bold red]🚨 {ep.ssrf_warning}[/bold red]"
                 if ep.ssrf_warning
-                else ("[green]✓ No immediate SSRF risk[/green]" if not ep.is_private else "[dim]Internal service[/dim]")
+                else (
+                    "[green]✓ No immediate SSRF risk[/green]"
+                    if not ep.is_private
+                    else "[dim]Internal service[/dim]"
+                )
             )
             loc = f"{ep.source_file}:{ep.line_number}"
             table.add_row(ep.raw_reference[:35], ips_str, ctx, loc, warn)
 
         console.print(table)
     else:
-        console.print("[dim]No hardcoded network endpoints or external IP addresses found in project files.[/dim]")
+        console.print(
+            "[dim]No hardcoded network endpoints or external IP addresses found in project files.[/dim]"
+        )
 
     console.print()
 
@@ -443,7 +468,11 @@ def print_model_comparison_table(leaderboard: Any) -> None:
     table.add_column("Est. Cost", justify="center")
 
     for card in leaderboard.scorecards:
-        fn_text = f"[bold red]{card.false_negatives}[/bold red]" if card.false_negatives > 0 else "[bold green]0[/bold green]"
+        fn_text = (
+            f"[bold red]{card.false_negatives}[/bold red]"
+            if card.false_negatives > 0
+            else "[bold green]0[/bold green]"
+        )
         f1_color = "green" if card.f1_score >= 0.9 else "yellow"
         table.add_row(
             card.model_name,

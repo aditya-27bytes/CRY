@@ -136,13 +136,19 @@ def interactive_menu() -> None:
         menu_table.add_column("Description", style="dim")
 
         menu_table.add_row(
-            "[1]", "Quick Scan", "Scan a specific local path (file/folder) or public Git repository URL"
+            "[1]",
+            "Quick Scan",
+            "Scan a specific local path (file/folder) or public Git repository URL",
         )
         menu_table.add_row(
-            "[2]", "Full Project Audit", "Scan the whole project across all 5 security scanner engines"
+            "[2]",
+            "Full Project Audit",
+            "Scan the whole project across all 5 security scanner engines",
         )
         menu_table.add_row(
-            "[3]", "Network & IP Intelligence", "Inspect IP records, reverse DNS, SSL/TLS, and HTTP headers"
+            "[3]",
+            "Network & IP Intelligence",
+            "Inspect IP records, reverse DNS, SSL/TLS, and HTTP headers",
         )
         menu_table.add_row(
             "[4]", "Health Check", "Inspect environment, scanners, and LLM configuration"
@@ -283,23 +289,28 @@ def configure_wizard() -> None:
             content = f"""# CRY Configuration
 CRY_LLM_BASE_URL=https://api.groq.com/openai/v1
 CRY_LLM_API_KEY={key}
-CRY_LLM_MODEL=openai/gpt-oss-120b
+CRY_LLM_MODEL=llama-3.1-8b-instant
+CRY_LLM_FALLBACK_MODELS=qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b,llama-3.3-70b-versatile
 """
             env_path.write_text(content, encoding="utf-8")
             console.print(f"[bold green]Saved configuration to {env_path}[/bold green]")
             # Live verification ping
             with console.status("[bold cyan]Verifying Groq API connection...[/bold cyan]"):
-                client = LLMClient(api_key=key, model="openai/gpt-oss-120b")
+                client = LLMClient(api_key=key, model="llama-3.1-8b-instant")
                 try:
                     asyncio.run(
                         client.chat_completion_json(
-                            system_prompt="Return JSON: {\"status\": \"ok\"}",
+                            system_prompt='Return JSON: {"status": "ok"}',
                             user_prompt="ping",
                         )
                     )
-                    console.print("[bold green]✅ Groq connection verified successfully![/bold green]")
+                    console.print(
+                        "[bold green]✅ Groq connection verified successfully![/bold green]"
+                    )
                 except Exception as e:
-                    console.print(f"[bold yellow]⚠️ Saved, but verification ping failed: {e}[/bold yellow]")
+                    console.print(
+                        f"[bold yellow]⚠️ Saved, but verification ping failed: {e}[/bold yellow]"
+                    )
 
     elif mode == "ollama":
         model_name = Prompt.ask("Enter local model name in Ollama", default="llama3.3:70b")
@@ -321,9 +332,7 @@ def guide() -> None:
     guide_table.add_column("Example", style="dim")
 
     guide_table.add_row("cry", "Opens the interactive welcome menu", "cry")
-    guide_table.add_row(
-        "cry scan", "Scans current directory with intelligent defaults", "cry scan"
-    )
+    guide_table.add_row("cry scan", "Scans current directory with intelligent defaults", "cry scan")
     guide_table.add_row(
         "cry scan <target>", "Scans local folder, file, or public Git URL", "cry scan ./src"
     )
@@ -348,9 +357,7 @@ def guide() -> None:
     guide_table.add_row(
         "cry scan -m <file>", "Exports findings to Markdown", "cry scan -m AUDIT.md"
     )
-    guide_table.add_row(
-        "cry scan -o <file>", "Exports findings to JSON", "cry scan -o report.json"
-    )
+    guide_table.add_row("cry scan -o <file>", "Exports findings to JSON", "cry scan -o report.json")
     guide_table.add_row(
         "cry net",
         "Automated project network footprint discovery & IP resolution",
@@ -435,10 +442,14 @@ def check() -> None:
         "SAST Engine", "[green]READY[/green]", "Code pattern rules active (SQLi, eval, CORS, etc.)"
     )
     table.add_row(
-        "Supply-Chain (SCA)", "[green]READY[/green]", "Dependency manifest auditor (package.json, requirements.txt)"
+        "Supply-Chain (SCA)",
+        "[green]READY[/green]",
+        "Dependency manifest auditor (package.json, requirements.txt)",
     )
     table.add_row(
-        "Config Auditor", "[green]READY[/green]", "Repository hygiene, .gitignore coverage, and Docker security"
+        "Config Auditor",
+        "[green]READY[/green]",
+        "Repository hygiene, .gitignore coverage, and Docker security",
     )
 
     console.print(table)
@@ -534,7 +545,9 @@ def scan(
                     text=True,
                 )
                 if res.returncode != 0:
-                    console.print(f"[bold red]Failed to clone Git repository:[/bold red]\n{res.stderr.strip()}")
+                    console.print(
+                        f"[bold red]Failed to clone Git repository:[/bold red]\n{res.stderr.strip()}"
+                    )
                     return
 
             _execute_scan(
@@ -695,17 +708,15 @@ def net(
         else f"Running network security audit on {target}..."
     )
     with console.status(f"[bold cyan]{msg}[/bold cyan]"):
-        report = (
-            audit_project_network(Path(target))
-            if is_project
-            else audit_network_target(target)
-        )
+        report = audit_project_network(Path(target)) if is_project else audit_network_target(target)
 
     print_network_report(report)
 
     if markdown_output:
         out = export_network_markdown_report(report, markdown_output)
-        console.print(f"[bold green]Network intelligence report saved to: [cyan]{out}[/cyan][/bold green]\n")
+        console.print(
+            f"[bold green]Network intelligence report saved to: [cyan]{out}[/cyan][/bold green]\n"
+        )
 
 
 @app.command("eval")
@@ -755,19 +766,29 @@ def eval_command(
         console.print(
             f"\n[bold cyan]Running side-by-side benchmark comparison for {len(model_list)} models...[/bold cyan]"
         )
-        leaderboard = run_multi_model_benchmark(models=model_list, base_url=base_url, api_key=api_key)
+        leaderboard = run_multi_model_benchmark(
+            models=model_list, base_url=base_url, api_key=api_key
+        )
         print_model_comparison_table(leaderboard)
         if markdown_output:
             export_benchmark_markdown(leaderboard, markdown_output)
-            console.print(f"[bold green]Comparative benchmark exported to: [cyan]{markdown_output}[/cyan][/bold green]\n")
+            console.print(
+                f"[bold green]Comparative benchmark exported to: [cyan]{markdown_output}[/cyan][/bold green]\n"
+            )
     else:
         target_model = model or (settings.LLM_MODEL if not no_ai else "Offline Heuristic (No AI)")
-        console.print(f"\n[bold cyan]Benchmarking model: [green]{target_model}[/green]...[/bold cyan]")
-        scorecard = run_model_benchmark(model=model, base_url=base_url, api_key=api_key, no_ai=no_ai)
+        console.print(
+            f"\n[bold cyan]Benchmarking model: [green]{target_model}[/green]...[/bold cyan]"
+        )
+        scorecard = run_model_benchmark(
+            model=model, base_url=base_url, api_key=api_key, no_ai=no_ai
+        )
         print_benchmark_scorecard(scorecard)
         if markdown_output:
             export_benchmark_markdown(scorecard, markdown_output)
-            console.print(f"[bold green]Benchmark scorecard exported to: [cyan]{markdown_output}[/cyan][/bold green]\n")
+            console.print(
+                f"[bold green]Benchmark scorecard exported to: [cyan]{markdown_output}[/cyan][/bold green]\n"
+            )
 
 
 rules_app = typer.Typer(
@@ -855,7 +876,9 @@ def test_rules() -> None:
             f"[bold green]✅ All {results['total_rules']} declarative security rules compiled and validated successfully![/bold green]\n"
         )
     else:
-        console.print(f"[bold red]❌ {len(results['failed_rules'])} rule(s) failed validation:[/bold red]")
+        console.print(
+            f"[bold red]❌ {len(results['failed_rules'])} rule(s) failed validation:[/bold red]"
+        )
         for f in results["failed_rules"]:
             console.print(f"  • [yellow]{f['id']}[/yellow]: {f['error']}")
         console.print()
@@ -882,19 +905,27 @@ def _execute_scan(
     all_findings = secret_findings + sast_findings
 
     if is_full_scan:
-        with console.status("[bold cyan]Auditing dependencies & supply-chain manifests...[/bold cyan]"):
+        with console.status(
+            "[bold cyan]Auditing dependencies & supply-chain manifests...[/bold cyan]"
+        ):
             sca_findings = scan_dependencies(scan_dir)
         console.print(f"  [dim]• Supply-chain (SCA):[/dim]     {len(sca_findings)} finding(s)")
 
-        with console.status("[bold cyan]Auditing repository & environment configurations...[/bold cyan]"):
+        with console.status(
+            "[bold cyan]Auditing repository & environment configurations...[/bold cyan]"
+        ):
             config_findings = scan_configurations(scan_dir)
         console.print(f"  [dim]• Config & Git auditor:[/dim]   {len(config_findings)} finding(s)")
 
-        with console.status("[bold cyan]Auditing network endpoints & SSRF attack vectors...[/bold cyan]"):
+        with console.status(
+            "[bold cyan]Auditing network endpoints & SSRF attack vectors...[/bold cyan]"
+        ):
             net_findings = scan_network_code_patterns(scan_dir)
         console.print(f"  [dim]• Network & SSRF scanner:[/dim] {len(net_findings)} finding(s)")
 
-        all_findings = secret_findings + sast_findings + sca_findings + config_findings + net_findings
+        all_findings = (
+            secret_findings + sast_findings + sca_findings + config_findings + net_findings
+        )
 
     _run_triage_and_report(
         all_findings=all_findings,
@@ -944,4 +975,3 @@ def _run_triage_and_report(
 
 if __name__ == "__main__":
     app()
-

@@ -46,6 +46,7 @@ def _is_in_safe_path(file_path: Path) -> bool:
     parts = {p.lower() for p in file_path.parts}
     return bool(parts & LIKELY_SAFE_PATHS)
 
+
 # ---------------------------------------------------------------------------
 # File extensions this scanner handles
 # ---------------------------------------------------------------------------
@@ -397,11 +398,11 @@ SAST_RULES: list[SASTRule] = [
             ),
             ".js": (
                 "Load secrets from environment variables: process.env.JWT_SECRET",
-                'const JWT_SECRET = process.env.JWT_SECRET;',
+                "const JWT_SECRET = process.env.JWT_SECRET;",
             ),
             ".ts": (
                 "Load secrets from environment variables: process.env.JWT_SECRET",
-                'const JWT_SECRET: string = process.env.JWT_SECRET!;',
+                "const JWT_SECRET: string = process.env.JWT_SECRET!;",
             ),
         },
     ),
@@ -471,7 +472,9 @@ def _extract_non_code_lines(source_text: str, extension: str) -> set[int]:
         try:
             tree = ast.parse(source_text)
             for node in ast.walk(tree):
-                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(
+                    node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
                     if (
                         node.body
                         and isinstance(node.body[0], ast.Expr)
@@ -537,22 +540,24 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
         stripped = line.strip()
 
         # Skip empty lines, pure comments, and rule metadata assignments
-        if not stripped or stripped.startswith((
-            "#",
-            "//",
-            "/*",
-            "*",
-            "<!--",
-            "title=",
-            "description=",
-            "fix_hint=",
-            "suggested_fix=",
-            "pattern=",
-            'r"""',
-            "r'''",
-            '"""',
-            "'''",
-        )):
+        if not stripped or stripped.startswith(
+            (
+                "#",
+                "//",
+                "/*",
+                "*",
+                "<!--",
+                "title=",
+                "description=",
+                "fix_hint=",
+                "suggested_fix=",
+                "pattern=",
+                'r"""',
+                "r'''",
+                '"""',
+                "'''",
+            )
+        ):
             continue
 
         for rule in SAST_RULES:
@@ -613,7 +618,10 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                     desc = ext_rule.description
                     if in_safe_path:
                         desc += " (This file is in a test/mock directory — verify if this file is deployed to production)."
-                    rule_fix_hint, rule_suggested_fix = ext_rule.fix_hint, (ext_rule.suggested_fix or "")
+                    rule_fix_hint, rule_suggested_fix = (
+                        ext_rule.fix_hint,
+                        (ext_rule.suggested_fix or ""),
+                    )
                     findings.append(
                         Finding(
                             id=f"sast-{uuid.uuid4().hex[:12]}",
