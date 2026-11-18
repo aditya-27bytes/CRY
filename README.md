@@ -3,11 +3,21 @@
 > **"Know if you're safe to ship."**  
 > An open-source application and network security testing & triage platform for indie developers, solo founders, and fast-moving teams. CRY combines multi-engine static scanning, AST taint dataflow tracking, zero-dependency declarative rules, BYOM AI model benchmarking, and automated project network footprint discovery to deliver plain-English verdicts (`SHIP`, `FIX_FIRST`, `DONT_SHIP`) with exact copy-paste replacement code diffs.
 
+[![Release](https://img.shields.io/badge/release-v0.4.0-blueviolet.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-101%20passed-brightgreen.svg)]()
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Type Checked](https://img.shields.io/badge/types-mypy-blue.svg)](http://mypy-lang.org/)
+
+> [!NOTE]
+> ### 🚀 Release v0.4.0 Highlights
+> * **🌐 Active & Passive Network Observability (`cry net`)**: Zero-packet passive footprint discovery, target ownership authorization gate, DNS rebinding protection, public database exposure alerts, and service offline detection.
+> * **🛡️ Multi-Model Failover & Privacy Guard**: Opt-in model failover (`CRY_FAILOVER=on`) with privacy boundaries preventing local code from failing over to remote cloud APIs.
+> * **🐧 Host & Linux System Health Monitor (`cry check`)**: Built-in system telemetry (CPU, RAM, disk, uptime, load averages, processes, network checks) with automated timestamped reports (`cry check --report`) and standalone Ubuntu Linux script (`scripts/system_health.sh`).
+> * **⚡ Modern Web & AI Security Rules**: Precision detection for SSTI, Prisma raw queries, JWT bypasses, CORS reflection, Vue XSS, tainted prompt injection (`CWE-1427`), and excessive agency (`CWE-1426`).
+>
+> See full details in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
