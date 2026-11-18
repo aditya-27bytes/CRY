@@ -20,9 +20,8 @@ Ground-truth evaluation across 13 benchmark test cases (derived from OWASP Juice
 
 | Version Snapshot | Total Cases | Found (TP) | Missed (FN) | False Alarms (FP) | True Negatives (TN) | Precision | Recall | F1 Score |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **v0.3 Snapshot** (`evals/results/v0.3.json`) | 13 | 7 | 0 | 0 | 6 | 100.00% | 100.00% | 100.00% |
-| **v0.4-M1 Rules Expansion** (`evals/results/v0.4-m1.json`) | 13 | 7 | 0 | 0 | 6 | 100.00% | 100.00% | 100.00% |
-| **v0.4 Final Release** (`evals/results/v0.4.json`) | 13 | 7 | 0 | 0 | 6 | 100.00% | 100.00% | 100.00% |
+| **v0.3 Baseline** (`evals/results/v0.3.json`) | 13 | 7 | 0 | 0 | 6 | 100.00% | 100.00% | 100.00% |
+| **v0.4 Release** (`evals/results/v0.4.json`) | 13 | 7 | 0 | 0 | 6 | 100.00% | 100.00% | 100.00% |
 
 ### v0.4 Engine Expansion Highlights
 - **Secrets Catalog**: Expanded coverage with verified token prefixes for OpenRouter (`sk-or-v1-`), Anthropic (`sk-ant-api03-`), Pinecone, LangSmith, and Replicate, plus high-entropy context detection for Cohere and Together AI.
