@@ -14,7 +14,7 @@ from cry.models import (
     Verdict,
     VerdictReport,
 )
-from cry.triage.client import LLMClient, LLMClientError
+from cry.triage.client import LLMClient, LLMClientError, PrivacyGuardBlockedError
 from cry.triage.prompts import TRIAGE_SYSTEM_PROMPT, build_triage_user_prompt
 
 
@@ -142,14 +142,14 @@ def _is_test_file(file_path_str: str | None, base_dir: Path | None = None) -> bo
 
     # 2. Check relative file path within scanned repository
     rel_parts = {part.lower() for part in p.parts}
-    if bool(rel_parts & TEST_DIR_NAMES):
+    if rel_parts & TEST_DIR_NAMES:
         return True
 
     # 3. Check full resolved path if base_dir provided
     if base_dir:
         full_path = p if p.is_absolute() else base_dir / p
         parts = {part.lower() for part in full_path.parts}
-        if bool(parts & TEST_DIR_NAMES):
+        if parts & TEST_DIR_NAMES:
             return True
 
     return False
@@ -504,6 +504,7 @@ class TriageEngine:
                     data, usage = await self.client.chat_completion_json(
                         system_prompt=TRIAGE_SYSTEM_PROMPT,
                         user_prompt=user_prompt,
+                        findings_count=len(batch),
                     )
                     total_usage.prompt_tokens += usage.prompt_tokens
                     total_usage.completion_tokens += usage.completion_tokens
@@ -578,6 +579,29 @@ class TriageEngine:
                                 blockers.append(fallback_triaged)
                             else:
                                 warnings.append(fallback_triaged)
+
+                except PrivacyGuardBlockedError as e:
+                    llm_errors.append(f"Privacy Guard active: {e}")
+                    for f, _ in batch:
+                        f_in_test = _is_test_file(f.file_path, target_dir)
+                        default_status = (
+                            TriageStatus.WARNING
+                            if f_in_test or f.severity != Severity.CRITICAL
+                            else TriageStatus.CONFIRMED_BLOCKER
+                        )
+                        fallback_triaged = TriagedFinding(
+                            finding=f,
+                            status=default_status,
+                            exploitability_reasoning=_generate_deep_heuristic_reasoning(f),
+                            plain_english_explanation=f.description,
+                            fix_recommendation=_generate_actionable_fix(f),
+                            suggested_replacement_code=_generate_fallback_replacement_code(f),
+                            triaged_by_model="CRY Privacy Guard (Offline Fallback)",
+                        )
+                        if default_status == TriageStatus.CONFIRMED_BLOCKER:
+                            blockers.append(fallback_triaged)
+                        else:
+                            warnings.append(fallback_triaged)
 
                 except LLMClientError as e:
                     llm_errors.append(str(e))
@@ -674,6 +698,7 @@ class TriageEngine:
             token_usage=total_usage,
             model_used=active_model_desc,
             model_switches=list(self.client.switched_models_log),
+            failover_events=list(self.client.failover_events),
         )
 
     def _heuristic_fallback(self, findings: list[Finding], target_dir: Path) -> VerdictReport:
@@ -763,4 +788,5 @@ class TriageEngine:
             warnings=warnings,
             likely_false_positives=likely_false_positives,
             model_used="Offline Heuristic Engine",
+            failover_events=list(self.client.failover_events),
         )

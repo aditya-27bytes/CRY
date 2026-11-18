@@ -45,3 +45,5 @@ build/
 *.log
 AUDIT_TEST.md
 scratch/
+.cry/
+

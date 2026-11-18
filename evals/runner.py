@@ -152,3 +152,32 @@ if __name__ == "__main__":
         # 3. Score against ground truth
         scorecard = score_triage_run(benchmark_cases, report)
         print_scorecard(scorecard)
+
+        # 4. Save results to JSON if requested
+        output_path: Path | None = None
+        for idx, arg in enumerate(sys.argv):
+            if arg in ("--output", "-o") and idx + 1 < len(sys.argv):
+                output_path = Path(sys.argv[idx + 1])
+                break
+
+        if output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            from cry import __version__
+
+            results_payload = {
+                "version": __version__,
+                "total_cases": scorecard.total_cases,
+                "found": scorecard.true_positives,
+                "missed": scorecard.false_negatives,
+                "false_alarms": scorecard.false_positives,
+                "true_negatives": scorecard.true_negatives,
+                "precision": round(scorecard.precision, 4),
+                "recall": round(scorecard.recall, 4),
+                "f1_score": round(scorecard.f1_score, 4),
+                "missed_case_ids": scorecard.missed_case_ids,
+                "wrongly_flagged_case_ids": scorecard.wrongly_flagged_case_ids,
+            }
+            output_path.write_text(json.dumps(results_payload, indent=2), encoding="utf-8")
+            console.print(
+                f"[bold green]Evaluation results saved to: [cyan]{output_path}[/cyan][/bold green]"
+            )

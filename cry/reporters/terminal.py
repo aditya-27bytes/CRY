@@ -35,7 +35,15 @@ def print_verdict_report(report: VerdictReport) -> None:
         else ""
     )
     failover_info = ""
-    if report.model_switches:
+    if report.failover_events:
+        failover_info = (
+            "\n[bold yellow]⚡ Multi-Model Failover Events:[/bold yellow]\n"
+            + "\n".join(
+                f"  • [yellow]{ev.provider}[/yellow] ({ev.model}) — Reason: [dim]{ev.reason}[/dim] (Triaged {ev.findings_handled} finding{'s' if ev.findings_handled != 1 else ''})"
+                for ev in report.failover_events
+            )
+        )
+    elif report.model_switches:
         failover_info = "\n[bold yellow]⚡ Multi-Model Resilience:[/bold yellow]\n" + "\n".join(
             f"  • [dim yellow]{sw}[/dim yellow]" for sw in report.model_switches
         )
@@ -168,6 +176,8 @@ def print_verdict_report(report: VerdictReport) -> None:
 
     # 5. Telemetry & Cost Footer
     telemetry_parts = [f"Scanned in {report.scan_duration_seconds:.2f}s"]
+    if report.skipped_files_summary:
+        telemetry_parts.append(f"Exclusions: {report.skipped_files_summary}")
     usage = report.token_usage
     if usage.total_tokens > 0:
         telemetry_parts.append(
@@ -188,10 +198,30 @@ def print_network_report(report: Any) -> None:
         print_project_network_report(report)
         return
 
+    if getattr(report, "authorization_token", None):
+        console.print(
+            Panel(
+                f"[bold yellow]⚠️ Target Authorization Required[/bold yellow]\n\n"
+                f"{report.error_message}\n\n"
+                f"[bold]Verification Token:[/bold] [bold cyan]{report.authorization_token}[/bold cyan]\n\n"
+                f"[bold]Choose one of the following methods to prove control:[/bold]\n"
+                f"  1. [bold]DNS TXT Record:[/bold] Add a TXT record for '{report.hostname}' with value:\n"
+                f"     [cyan]cry-verification={report.authorization_token}[/cyan]\n"
+                f"  2. [bold]Well-Known HTTP File:[/bold] Host a plain text file at:\n"
+                f"     [cyan]https://{report.hostname}/.well-known/cry-challenge.txt[/cyan]\n"
+                f"     containing: [cyan]{report.authorization_token}[/cyan]\n\n"
+                f"Once configured, run:\n"
+                f"  [bold green]cry net {report.target} --authorize[/bold green]",
+                title="CRY Target Authorization Gate",
+                border_style="yellow",
+            )
+        )
+        return
+
     if report.error_message:
         console.print(
             Panel(
-                f"[bold red]Network Audit Failed[/bold red]\n\n{report.error_message}",
+                f"[bold red]Network Audit Blocked[/bold red]\n\n{report.error_message}",
                 title="CRY Network & IP Intelligence",
                 border_style="red",
             )
@@ -200,13 +230,35 @@ def print_network_report(report: Any) -> None:
 
     # 1. Headline Score Banner
     grade = report.security_score
-    grade_color = "green" if grade in ("A+", "A") else ("yellow" if grade in ("B", "C") else "red")
-    badge = f"[bold white on {grade_color}]  GRADE: {grade}  [/bold white on {grade_color}]"
-
+    if getattr(report, "service_offline", False):
+        grade_color = "yellow"
+        badge = "[bold white on dark_orange]  STATUS: SERVICE OFFLINE  [/bold white on dark_orange]"
+    else:
+        grade_color = (
+            "green" if grade in ("A+", "A") else ("yellow" if grade in ("B", "C") else "red")
+        )
+        badge = f"[bold white on {grade_color}]  OBSERVED GRADE: {grade}  [/bold white on {grade_color}]"
+    auth_badge = (
+        f"  [dim]| Auth: {report.authorization_status}[/dim]"
+        if getattr(report, "authorization_status", None)
+        else ""
+    )
     banner_text = [
-        f"{badge}  [bold {grade_color}]NETWORK DEFENSE SCORECARD[/bold {grade_color}]\n",
+        f"{badge}  [bold {grade_color}]NETWORK DEFENSE & HOST OBSERVABILITY[/bold {grade_color}]{auth_badge}\n",
         f"[bold]Target:[/bold] [cyan]{report.target}[/cyan] (Resolved Host: {report.hostname})",
     ]
+    if getattr(report, "service_offline", False) and getattr(
+        report, "service_offline_message", None
+    ):
+        banner_text.append(f"\n[bold yellow]⚠️ {report.service_offline_message}[/bold yellow]")
+    if getattr(report, "is_deep", False):
+        banner_text.append(
+            "[bold cyan]Mode:[/bold cyan] Deep Active Scan (Extended Ports & Protocols)"
+        )
+    if getattr(report, "waf_or_cdn", None):
+        banner_text.append(
+            f"[bold dim]Edge Ingress / CDN:[/bold dim] {report.waf_or_cdn} [dim](Informational)[/dim]"
+        )
     if report.ssrf_risk_warning:
         banner_text.append(f"\n[bold red]🚨 ALERT: {report.ssrf_risk_warning}[/bold red]")
 
@@ -217,6 +269,18 @@ def print_network_report(report: Any) -> None:
             border_style=grade_color,
         )
     )
+
+    # 1.5 Database Exposure Critical Alert
+    db_exposures = getattr(report, "database_exposures_count", 0)
+    if db_exposures > 0:
+        console.print(
+            Panel(
+                f"[bold white on red]  CRITICAL SECURITY ALERT  [/bold white on red]\n\n"
+                f"[bold red]Detected {db_exposures} database / cache port(s) directly exposed on public routable internet![/bold red]\n"
+                "[yellow]Database services should never listen on public interfaces. Restrict ingress via firewall / VPC security groups immediately.[/yellow]",
+                border_style="red",
+            )
+        )
 
     # 2. IP & DNS Resolution Table
     ip_table = Table(
@@ -261,6 +325,43 @@ def print_network_report(report: Any) -> None:
 
     console.print(ip_table)
 
+    # 2.5 Port Reachability Table
+    ports_checked = getattr(report, "ports_checked", [])
+    if ports_checked:
+        port_table = Table(
+            title=f"🔌 Port Reachability & Service Exposure ({len(ports_checked)} probed)",
+            border_style="magenta",
+            show_lines=True,
+            expand=True,
+        )
+        port_table.add_column("Port", style="bold", width=10)
+        port_table.add_column("Service", width=22)
+        port_table.add_column("Status", width=14)
+        port_table.add_column("Exposure & Risk Context", ratio=1)
+
+        for pr in ports_checked:
+            if pr.status == "OPEN":
+                status_style = "[bold green]OPEN[/bold green]"
+            elif pr.status == "CLOSED":
+                status_style = "[dim]CLOSED[/dim]"
+            else:
+                status_style = "[yellow]FILTERED[/yellow]"
+
+            if pr.severity == "CRITICAL":
+                context_str = (
+                    f"[bold red]CRITICAL: {pr.note or 'Exposed database on public IP!'}[/bold red]"
+                )
+            elif pr.severity == "HIGH":
+                context_str = f"[bold yellow]HIGH RISK: {pr.note}[/bold yellow]"
+            elif pr.status == "OPEN":
+                context_str = f"[green]Reachable ({pr.service})[/green]"
+            else:
+                context_str = "[dim]Unreachable or blocked by firewall[/dim]"
+
+            port_table.add_row(str(pr.port), pr.service, status_style, context_str)
+
+        console.print(port_table)
+
     # 3. SSL/TLS Certificate Table
     if report.ssl_info:
         ssl_info = report.ssl_info
@@ -295,12 +396,41 @@ def print_network_report(report: Any) -> None:
             if "1.3" in ssl_info.tls_version or "1.2" in ssl_info.tls_version
             else "[red]Deprecated Protocol[/red]",
         )
-        tls_table.add_row("Cipher Suite", ssl_info.cipher_suite, "Negotiated Cipher Suite")
+
+        cipher_display = ssl_info.cipher_suite
+        if getattr(ssl_info, "weak_ciphers", None):
+            cipher_display += (
+                f" [bold red](WEAK CIPHER: {', '.join(ssl_info.weak_ciphers)})[/bold red]"
+            )
+        tls_table.add_row("Cipher Suite", cipher_display, "Negotiated Cipher Suite")
+
+        if getattr(ssl_info, "legacy_protocols_supported", None):
+            tls_table.add_row(
+                "Legacy Protocols",
+                f"[bold red]{', '.join(ssl_info.legacy_protocols_supported)}[/bold red]",
+                "[red]HIGH RISK: Deprecated TLS 1.0/1.1 accepted[/red]",
+            )
+
+        if getattr(ssl_info, "platform_limitation_note", None):
+            tls_table.add_row(
+                "Platform Note",
+                "[dim]OpenSSL SECLEVEL Limitation[/dim]",
+                f"[dim]{ssl_info.platform_limitation_note}[/dim]",
+            )
 
         console.print(tls_table)
 
     # 4. HTTP Security Headers Table
-    if report.security_headers:
+    if getattr(report, "service_offline", False):
+        console.print(
+            Panel(
+                "[yellow]Target web service is offline or unreachable on the probed port.[/yellow]\n"
+                "[dim]Start your web server and rerun the command to audit HTTP security headers and defenses.[/dim]",
+                title="🛡️ HTTP Defense-in-Depth Security Headers",
+                border_style="yellow",
+            )
+        )
+    elif report.security_headers:
         hdr_table = Table(
             title="🛡️ HTTP Defense-in-Depth Security Headers",
             border_style="blue",
@@ -320,6 +450,15 @@ def print_network_report(report: Any) -> None:
 
         console.print(hdr_table)
 
+    # 5. Non-Certifying Observability Disclaimer
+    console.print(
+        Panel(
+            "[dim]ℹ️ [bold]CRY Observability Assurance:[/bold] Reported indicators reflect technical observations "
+            "obtained from authorized active probes. CRY reports observed technical attributes only and never declares "
+            "a host or application 'secure' or free of vulnerabilities.[/dim]",
+            border_style="dim",
+        )
+    )
     console.print()
 
 
@@ -333,59 +472,103 @@ def print_project_network_report(report: Any) -> None:
         else "[bold white on green]  NETWORK POSTURE OK  [/bold white on green]"
     )
 
+    mode_label = (
+        "PASSIVE FOOTPRINT (Zero Network Packets Dispatched)"
+        if getattr(report, "is_passive", True)
+        else "LIVE NETWORK AUDIT (Active DNS/SSL Probes)"
+    )
+
     banner_text = [
         f"{badge}  [bold {alert_color}]PROJECT NETWORK & IP FOOTPRINT AUDIT[/bold {alert_color}]\n",
         f"[bold]Project Target:[/bold] [cyan]{report.project_dir}[/cyan]",
-        f"[bold]Local Host Environment:[/bold] {report.local_hostname} ([cyan]{report.local_outbound_ip}[/cyan])",
+        f"[bold]Scan Mode:[/bold] {mode_label}",
         f"[bold]Endpoints Discovered:[/bold] {report.total_endpoints_found} declared targets | [bold yellow]{report.private_ips_count} internal/private[/bold yellow] | [bold red]{report.ssrf_risks_count} SSRF risks[/bold red]",
     ]
 
     console.print(
         Panel(
             "\n".join(banner_text),
-            title="CRY Project Network Intelligence",
+            title="CRY Project Network Footprint",
             border_style=alert_color,
         )
     )
 
-    if report.discovered_endpoints:
-        table = Table(
-            title="🌐 Discovered Network Endpoints & Live IP Resolutions",
+    # 1. Internal & Sensitive Network Scope Endpoints (RFC-1918, Loopback, Link-Local, Cloud Metadata)
+    internal_list = getattr(
+        report,
+        "internal_endpoints",
+        [
+            ep
+            for ep in report.discovered_endpoints
+            if ep.is_internal or ep.is_private or ep.is_metadata
+        ],
+    )
+    if internal_list:
+        table_int = Table(
+            title=f"🔒 Internal & Sensitive Network Scope ({len(internal_list)} endpoint{'s' if len(internal_list) != 1 else ''})",
+            border_style="yellow",
+            show_lines=True,
+            expand=True,
+        )
+        table_int.add_column("Endpoint / Reference", style="bold cyan", width=30)
+        table_int.add_column("Normalized IP", width=18)
+        table_int.add_column("Security Scope", width=22)
+        table_int.add_column("Source Location", width=26, style="dim")
+        table_int.add_column("SSRF / Risk Warning", ratio=1)
+
+        for ep in internal_list:
+            ip_display = ep.normalized_ip or (
+                ", ".join(ep.resolved_ips) if ep.resolved_ips else "N/A"
+            )
+            ctx = (
+                f"[yellow]{ep.security_scope}[/yellow]"
+                if "Public" not in ep.security_scope
+                else "[green]Public Routable[/green]"
+            )
+            if ep.is_metadata:
+                ctx = "[bold red]Cloud Metadata (IMDS)[/bold red]"
+            warn = (
+                f"[bold red]🚨 {ep.ssrf_warning}[/bold red]"
+                if ep.ssrf_warning
+                else "[dim]Internal service[/dim]"
+            )
+            loc = f"{ep.source_file}:{ep.line_number}"
+            table_int.add_row(ep.raw_reference[:35], ip_display, ctx, loc, warn)
+
+        console.print(table_int)
+        console.print()
+
+    # 2. External Public Scope Endpoints
+    external_list = getattr(
+        report,
+        "external_endpoints",
+        [
+            ep
+            for ep in report.discovered_endpoints
+            if not (ep.is_internal or ep.is_private or ep.is_metadata)
+        ],
+    )
+    if external_list:
+        table_ext = Table(
+            title=f"🌐 External Public Scope ({len(external_list)} endpoint{'s' if len(external_list) != 1 else ''})",
             border_style="cyan",
             show_lines=True,
             expand=True,
         )
-        table.add_column("Endpoint / Reference", style="bold cyan", width=30)
-        table.add_column("Resolved IPv4 (A)", width=18)
-        table.add_column("Security Context", width=22)
-        table.add_column("Source Location", width=26, style="dim")
-        table.add_column("SSRF / Risk Warning", ratio=1)
+        table_ext.add_column("Endpoint / Reference", style="bold cyan", width=35)
+        table_ext.add_column("Host / Target", width=25)
+        table_ext.add_column("Security Scope", width=20)
+        table_ext.add_column("Source Location", style="dim", ratio=1)
 
-        for ep in report.discovered_endpoints:
-            ips_str = ", ".join(ep.resolved_ips) if ep.resolved_ips else "Unresolved"
-            ctx = (
-                "[red bold]Cloud Metadata (IMDS)[/red bold]"
-                if ep.is_metadata
-                else (
-                    "[yellow]Private / RFC-1918[/yellow]"
-                    if ep.is_private
-                    else "[green]Public Routable[/green]"
-                )
-            )
-            warn = (
-                f"[bold red]🚨 {ep.ssrf_warning}[/bold red]"
-                if ep.ssrf_warning
-                else (
-                    "[green]✓ No immediate SSRF risk[/green]"
-                    if not ep.is_private
-                    else "[dim]Internal service[/dim]"
-                )
-            )
+        for ep in external_list:
             loc = f"{ep.source_file}:{ep.line_number}"
-            table.add_row(ep.raw_reference[:35], ips_str, ctx, loc, warn)
+            table_ext.add_row(
+                ep.raw_reference[:40], ep.host, f"[green]{ep.security_scope}[/green]", loc
+            )
 
-        console.print(table)
-    else:
+        console.print(table_ext)
+
+    if not report.discovered_endpoints:
         console.print(
             "[dim]No hardcoded network endpoints or external IP addresses found in project files.[/dim]"
         )

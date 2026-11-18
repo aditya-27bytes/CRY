@@ -29,6 +29,10 @@ class RuleDefinition(BaseModel):
         default=None,
         description="Minimum Shannon entropy threshold (for high-entropy secrets)",
     )
+    confidence: float = Field(
+        default=1.0,
+        description="Rule confidence score (0.0 to 1.0)",
+    )
     description: str = Field(description="Problem explanation")
     fix_hint: str = Field(description="Guidance on how to remediate")
     suggested_fix: str | None = Field(default=None, description="Code replacement template")

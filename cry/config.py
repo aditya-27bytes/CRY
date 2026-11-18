@@ -30,6 +30,28 @@ class Settings:
     SCAN_TIMEOUT_SECONDS: int = int(os.getenv("CRY_SCAN_TIMEOUT_SECONDS", "300"))
     LOG_LEVEL: str = os.getenv("CRY_LOG_LEVEL", "INFO")
 
+    # Secondary / Failover Provider (e.g. OpenRouter)
+    SECONDARY_BASE_URL: str = os.getenv(
+        "CRY_SECONDARY_BASE_URL",
+        os.getenv("CRY_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+    )
+    SECONDARY_API_KEY: str = os.getenv(
+        "CRY_SECONDARY_API_KEY",
+        os.getenv("CRY_OPENROUTER_API_KEY", ""),
+    )
+    SECONDARY_MODEL: str = os.getenv(
+        "CRY_SECONDARY_MODEL",
+        os.getenv("CRY_OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct"),
+    )
+
+    # Opt-in failover control (CRY_FAILOVER=on / true / 1)
+    FAILOVER_ENABLED: bool = os.getenv("CRY_FAILOVER", "off").strip().lower() in (
+        "on",
+        "true",
+        "1",
+        "yes",
+    )
+
     # Configurable Fallback Models Pool (used when primary model hits rate limits or 404s)
     _env_fallbacks = os.getenv("CRY_LLM_FALLBACK_MODELS", "")
     FALLBACK_MODELS: list[str] = (
@@ -92,9 +114,32 @@ class Settings:
             cls.LLM_API_KEY = api_key
 
     @classmethod
+    def is_local_endpoint(cls, url: str | None = None) -> bool:
+        """Check if an endpoint URL points to a local host or private network address."""
+        target_url = (url or cls.LLM_BASE_URL).strip().lower()
+        if any(h in target_url for h in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "local")):
+            return True
+        try:
+            import ipaddress
+            import urllib.parse
+
+            parsed = urllib.parse.urlparse(target_url)
+            host = parsed.hostname or target_url.split("/")[0].split(":")[0]
+            ip_obj = ipaddress.ip_address(host)
+            return (
+                ip_obj.is_loopback
+                or ip_obj.is_private
+                or ip_obj.is_link_local
+                or ip_obj.is_reserved
+            )
+        except Exception:
+            pass
+        return False
+
+    @classmethod
     def is_local_llm(cls) -> bool:
-        """Check if LLM is pointing to a local host (Ollama / vLLM / LocalAI)."""
-        return "localhost" in cls.LLM_BASE_URL or "127.0.0.1" in cls.LLM_BASE_URL
+        """Check if primary LLM is pointing to a local host (Ollama / vLLM / LocalAI)."""
+        return cls.is_local_endpoint(cls.LLM_BASE_URL)
 
     @classmethod
     def has_valid_llm_config(cls) -> bool:
@@ -102,6 +147,13 @@ class Settings:
         if cls.is_local_llm():
             return True
         return bool(cls.LLM_API_KEY and not cls.LLM_API_KEY.startswith("your_"))
+
+    @classmethod
+    def has_valid_secondary_config(cls) -> bool:
+        """Verify if a valid secondary failover provider is configured."""
+        if cls.is_local_endpoint(cls.SECONDARY_BASE_URL):
+            return True
+        return bool(cls.SECONDARY_API_KEY and not cls.SECONDARY_API_KEY.startswith("your_"))
 
 
 settings = Settings()

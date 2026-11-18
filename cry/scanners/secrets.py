@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from cry.exclusions import ExclusionStats, GitIgnoreMatcher, should_skip_path
 from cry.models import Category, Finding, Severity
 from cry.scanners.base import BaseScanner
 
@@ -266,7 +267,7 @@ def _shannon_entropy(data: str) -> float:
 def _is_in_safe_path(file_path: Path) -> bool:
     """Check if file lives under a test/mock/fixture directory."""
     parts = {p.lower() for p in file_path.parts}
-    return bool(parts & LIKELY_SAFE_PATHS)
+    return not parts.isdisjoint(LIKELY_SAFE_PATHS)
 
 
 _CACHED_CATALOG_RULES: list[Any] | None = None
@@ -286,12 +287,24 @@ def _get_catalog_secret_rules(base_dir: Path) -> list[Any]:
     return _CACHED_CATALOG_RULES
 
 
-def _should_skip_file(file_path: Path, max_size_mb: int = 5) -> bool:
+def _should_skip_file(
+    file_path: Path,
+    max_size_mb: int = 5,
+    base_dir: Path | None = None,
+    include_vendor: bool = False,
+    gitignore: GitIgnoreMatcher | None = None,
+) -> bool:
     """Determine if a file should be skipped based on directory, extension, or size."""
-    # Skip directories
-    for part in file_path.parts:
-        if part in SKIP_DIRS:
-            return True
+    b_dir = base_dir or file_path.parent
+    decision = should_skip_path(
+        file_path,
+        b_dir,
+        include_vendor=include_vendor,
+        gitignore=gitignore,
+        max_file_size_mb=max_size_mb,
+    )
+    if decision.skip:
+        return True
 
     # Skip by extension
     suffix = file_path.suffix.lower()
@@ -302,21 +315,7 @@ def _should_skip_file(file_path: Path, max_size_mb: int = 5) -> bool:
     name_lower = file_path.name.lower()
     if name_lower.startswith("test_") and name_lower.endswith(".py"):
         return True
-    if name_lower.endswith(("_test.py", ".spec.ts", ".test.ts", ".spec.js", ".test.js")):
-        return True
-
-    # Skip files ending with common minified patterns
-    if name_lower.endswith((".min.js", ".min.css", ".bundle.js")):
-        return True
-
-    # Skip oversized files
-    try:
-        if file_path.stat().st_size > max_size_mb * 1024 * 1024:
-            return True
-    except OSError:
-        return True
-
-    return False
+    return name_lower.endswith(("_test.py", ".spec.ts", ".test.ts", ".spec.js", ".test.js"))
 
 
 def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
@@ -414,8 +413,13 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
             for pat in ext_rule.compile_patterns():
                 ext_match = pat.search(line)
                 if ext_match:
-                    secret_val = ext_match.group(0)
+                    secret_val = ext_match.group(1) if ext_match.groups() else ext_match.group(0)
                     if any(p in secret_val.lower() for p in PLACEHOLDER_KEYWORDS):
+                        continue
+                    if (
+                        ext_rule.entropy_min is not None
+                        and _shannon_entropy(secret_val) < ext_rule.entropy_min
+                    ):
                         continue
                     env_var = ext_rule.name.upper().replace(" ", "_").replace("-", "_")
                     fix = (
@@ -439,6 +443,7 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                             fix_hint=ext_rule.fix_hint,
                             suggested_fix=ext_rule.suggested_fix or fix,
                             raw_evidence=f"Matched external rule: {ext_rule.rule_id}",
+                            confidence=ext_rule.confidence,
                         )
                     )
                     break
@@ -496,12 +501,19 @@ def _redact_line(line: str, secret: str) -> str:
     return line.replace(secret, redacted)
 
 
-def scan_directory(target_dir: Path, max_file_size_mb: int = 5) -> list[Finding]:
+def scan_directory(
+    target_dir: Path,
+    max_file_size_mb: int = 5,
+    include_vendor: bool = False,
+    stats: ExclusionStats | None = None,
+) -> list[Finding]:
     """Scan an entire directory tree for leaked secrets.
 
     Args:
         target_dir: Root directory to scan.
         max_file_size_mb: Skip files larger than this.
+        include_vendor: Whether to include vendor/minified/gitignored files.
+        stats: Optional ExclusionStats instance to track skipped files.
 
     Returns:
         List of normalized Finding objects.
@@ -511,10 +523,29 @@ def scan_directory(target_dir: Path, max_file_size_mb: int = 5) -> list[Finding]
     if not target_dir.is_dir():
         return findings
 
+    gitignore = GitIgnoreMatcher(target_dir) if not include_vendor else None
+
     for file_path in target_dir.rglob("*"):
         if not file_path.is_file():
             continue
-        if _should_skip_file(file_path, max_file_size_mb):
+        decision = should_skip_path(
+            file_path,
+            target_dir,
+            include_vendor=include_vendor,
+            gitignore=gitignore,
+            max_file_size_mb=max_file_size_mb,
+        )
+        if decision.skip:
+            if stats and decision.reason:
+                stats.record_skip(file_path, decision.reason)
+            continue
+        suffix = file_path.suffix.lower()
+        if suffix in SKIP_EXTENSIONS:
+            continue
+        name_lower = file_path.name.lower()
+        if name_lower.startswith("test_") and name_lower.endswith(".py"):
+            continue
+        if name_lower.endswith(("_test.py", ".spec.ts", ".test.ts", ".spec.js", ".test.js")):
             continue
         findings.extend(scan_file(file_path, target_dir))
 
@@ -539,10 +570,19 @@ class SecretsScanner(BaseScanner):
         """Scan a single file directly."""
         return scan_file(file_path, base_dir)
 
-    async def scan(self, target: Path | str) -> list[Finding]:
+    async def scan(
+        self,
+        target: Path | str,
+        include_vendor: bool = False,
+        stats: ExclusionStats | None = None,
+    ) -> list[Finding]:
         target_path = Path(target)
         if target_path.is_file():
             return scan_file(target_path, target_path.parent)
         if target_path.is_dir():
-            return scan_directory(target_path)
+            return scan_directory(
+                target_path,
+                include_vendor=include_vendor,
+                stats=stats,
+            )
         return []

@@ -83,3 +83,169 @@ patterns = ['requests\.(?:get|post)\s*\([^)]*req\.(?:args|query|params)', 'axios
 description = "Sending HTTP requests directly to an unvalidated user-supplied URL allows Server-Side Request Forgery (SSRF)."
 fix_hint = "Validate URLs against an explicit domain whitelist and resolve DNS to block private IP addresses."
 suggested_fix = "if not is_allowed_domain(target_url):\n    raise ValueError('Forbidden domain')\nrequests.get(target_url)"
+
+# --- Modern Web & Framework SAST Rules ---
+
+[[rules]]
+rule_id = "sast-jinja2-ssti"
+name = "Flask/Jinja2 Server-Side Template Injection (SSTI)"
+category = "INJECTION"
+severity = "CRITICAL"
+cwe_id = "CWE-94"
+languages = [".py"]
+patterns = [
+    "render_template_string\\s*\\(\\s*f['\"]",
+    "render_template_string\\s*\\(\\s*['\"][^'\"]*['\"]\\s*(?:\\+|%)\\s*",
+    "render_template_string\\s*\\(\\s*[a-zA-Z_][a-zA-Z0-9_.]*\\s*(?:\\)|,)",
+]
+description = "render_template_string() called with a dynamically constructed or variable template. Passing user input into the template string allows arbitrary Python object traversal and Remote Code Execution (RCE)."
+fix_hint = "Pass a static template string literal and supply user values safely as keyword context arguments: render_template_string('Hello {{ name }}', name=name)."
+suggested_fix = "render_template_string('<h1>Hello {{ name }}</h1>', name=user_input)"
+
+[[rules]]
+rule_id = "sast-prisma-raw-sql-injection"
+name = "Prisma Raw SQL Injection via Dynamic Query"
+category = "INJECTION"
+severity = "CRITICAL"
+cwe_id = "CWE-89"
+languages = [".ts", ".js", ".tsx", ".jsx"]
+patterns = [
+    "prisma\\.\\$(?:queryRawUnsafe|executeRawUnsafe)\\s*\\(\\s*`[^`]*\\$\\{[^}]+\\}[^`]*`",
+    "prisma\\.\\$(?:queryRawUnsafe|executeRawUnsafe)\\s*\\(\\s*['\"][^'\"]*['\"]\\s*\\+",
+    "prisma\\.\\$(?:queryRawUnsafe|executeRawUnsafe)\\s*\\(\\s*[a-zA-Z_][a-zA-Z0-9_.]*\\s*(?:\\)|,)",
+]
+description = "Prisma $queryRawUnsafe or $executeRawUnsafe invoked with an interpolated or concatenated string. This bypasses Prisma's automatic query parameterization and creates a direct SQL injection vulnerability."
+fix_hint = "Use Prisma's parameterized tagged template literal: await prisma.$queryRaw`SELECT * FROM User WHERE id = ${id}`; instead of $queryRawUnsafe."
+suggested_fix = "await prisma.$queryRaw`SELECT * FROM User WHERE id = ${id}`;"
+
+[[rules]]
+rule_id = "sast-jwt-verification-disabled"
+name = "JWT Signature or Expiration Verification Disabled"
+category = "AUTHENTICATION"
+severity = "CRITICAL"
+cwe_id = "CWE-347"
+languages = [".py", ".ts", ".js"]
+patterns = [
+    "jwt\\.decode\\s*\\([^)]*verify\\s*=\\s*False",
+    "['\"]verify_signature['\"]\\s*:\\s*False",
+    "ignoreExpiration\\s*:\\s*true",
+]
+description = "JWT token verification has been explicitly disabled (verify=False, verify_signature: False, or ignoreExpiration: true). Attackers can forge arbitrary tokens and claims to gain unauthorized access."
+fix_hint = "Enforce cryptographic verification on all tokens: jwt.decode(token, secret, algorithms=['HS256'])."
+suggested_fix = 'jwt.decode(token, SECRET, algorithms=["HS256"])'
+
+[[rules]]
+rule_id = "sast-cors-origin-reflection-credentials"
+name = "CORS Origin Reflection with Credentials Allowed"
+category = "MISCONFIGURATION"
+severity = "HIGH"
+cwe_id = "CWE-942"
+languages = [".ts", ".js", ".py"]
+patterns = [
+    "origin\\s*:\\s*true\\s*,\\s*credentials\\s*:\\s*true",
+    "credentials\\s*:\\s*true\\s*,\\s*origin\\s*:\\s*true",
+    "origin\\s*:\\s*\\([^)]*\\)\\s*=>\\s*callback\\s*\\(\\s*null\\s*,\\s*true\\s*\\)\\s*,\\s*credentials\\s*:\\s*true",
+    "header\\s*\\(\\s*['\"]Access-Control-Allow-Origin['\"]\\s*,\\s*req\\.(?:headers|get)\\s*\\(['\"]origin['\"]",
+    "set_header\\s*\\(\\s*['\"]Access-Control-Allow-Origin['\"]\\s*,\\s*request\\.headers\\.get\\s*\\(['\"]origin['\"]",
+]
+description = "CORS configuration reflects the untrusted request Origin header while allowing credentials (Access-Control-Allow-Credentials: true). Any malicious site visited by an authenticated user can steal private session data."
+fix_hint = "Validate the incoming Origin against an explicit strict allowlist before setting Access-Control-Allow-Origin."
+suggested_fix = "const ALLOWED = ['https://myapp.com'];\nif (ALLOWED.includes(origin)) res.header('Access-Control-Allow-Origin', origin);"
+
+[[rules]]
+rule_id = "sast-vue-v-html-xss"
+name = "Vue Raw HTML Injection via v-html"
+category = "INJECTION"
+severity = "CRITICAL"
+cwe_id = "CWE-79"
+languages = [".vue", ".js", ".ts", ".html"]
+patterns = [
+    "v-html\\s*=\\s*['\"](?!\\s*(?:DOMPurify\\.sanitize|sanitizeHtml)\\s*\\()(?!['\"][^'\"]*['\"])[a-zA-Z0-9_.]+['\"]",
+]
+description = "Vue v-html directive bound to dynamic untrusted data without sanitization. Rendering unsanitized HTML directly into the page causes Cross-Site Scripting (XSS)."
+fix_hint = "Sanitize untrusted content using DOMPurify.sanitize() before passing to v-html, or use standard mustache templating: {{ userText }}."
+suggested_fix = '<div v-html="DOMPurify.sanitize(userContent)"></div>'
+
+# --- Modern AI & LLM Application Rules ---
+
+[[rules]]
+# CWE-1427: Improper Neutralization of Input Used for LLM Prompting (Prompt Injection)
+rule_id = "sast-ai-prompt-injection-concatenation"
+name = "Direct Prompt Injection via Dynamic Prompt String Construction"
+category = "INJECTION"
+severity = "MEDIUM"
+cwe_id = "CWE-1427"
+languages = [".py", ".ts", ".js"]
+patterns = [
+    "(?:prompt|messages|system_message)\\s*=\\s*f['\"].*(?:req\\.|request\\.|user_input|params\\[)",
+    "PromptTemplate\\s*\\(\\s*template\\s*=\\s*f['\"]",
+    "(?:chat|completion)\\.(?:create|generate|invoke)\\s*\\([^)]*(?:f['\"][^'\"]*(?:req\\.|request\\.|user_input)|(?:req\\.|request\\.)\\w+\\s*\\+)",
+]
+description = "Request-derived or untrusted user input is interpolated directly into an LLM prompt string. Delimiters, XML fencing, and message roles reduce but do not eliminate prompt injection. Treat model inputs as untrusted and limit the model's capabilities."
+fix_hint = "Separate system instructions and user input into dedicated message roles: [{'role': 'system', 'content': '...'}, {'role': 'user', 'content': user_input}]. Avoid concatenating instructions with raw user data."
+suggested_fix = "messages = [{'role': 'system', 'content': 'Translate text to French.'}, {'role': 'user', 'content': user_input}]"
+
+[[rules]]
+# CWE-1426: Improper Validation of Generative AI Output / Excessive Agency Tool
+rule_id = "sast-ai-excessive-agency-tool"
+name = "Excessive Agency: Autonomous Shell / Code Execution Tool"
+category = "MISCONFIGURATION"
+severity = "MEDIUM"
+cwe_id = "CWE-1426"
+languages = [".py", ".ts", ".js"]
+patterns = [
+    "\\b(?:PythonREPLTool|PythonAstREPLTool|BashProcess|TerminalTool|create_python_agent)\\b",
+]
+description = "Agent configured with arbitrary shell or code execution tools (e.g. Python REPL, Bash). If prompt-injected or manipulated, an agent with excessive agency can execute destructive system commands."
+fix_hint = "Restrict agent tools to scoped, read-only APIs with strict parameter validation schemas and human-in-the-loop approval gates."
+suggested_fix = "# Restrict agent tools to scoped read-only functions with human confirmation gates"
+
+[[rules]]
+# CWE-94 / CWE-1426: Direct Execution of Unvalidated LLM Output (Blocker)
+rule_id = "sast-ai-unvalidated-exec-sink"
+name = "Remote Code Execution via Unvalidated LLM Output to Execution Sink"
+category = "INJECTION"
+severity = "CRITICAL"
+cwe_id = "CWE-1426"
+languages = [".py", ".ts", ".js"]
+patterns = [
+    "(?:eval|exec|os\\.system|subprocess\\.(?:run|Popen|call))\\s*\\(\\s*(?:response|completion|result)\\.(?:choices|content|text)",
+    "(?:eval|exec|os\\.system|subprocess\\.(?:run|Popen|call))\\s*\\(\\s*(?:llm_output|ai_response|model_output)",
+]
+description = "Generative AI model output passed directly into an execution sink (eval/exec/subprocess/os.system). Treating generative AI output as trusted executable code allows arbitrary Remote Code Execution (RCE) via prompt injection."
+fix_hint = "Never execute LLM-generated strings directly. Parse structured JSON outputs and validate against strict schemas instead of running arbitrary scripts."
+suggested_fix = "# Parse and validate structured output instead of calling eval()\ndata = json.loads(response.choices[0].message.content)"
+
+[[rules]]
+# CWE-1427: Indirect Prompt Injection via Unfiltered RAG Ingestion
+rule_id = "sast-ai-rag-unfiltered-ingestion"
+name = "Insecure RAG Ingestion of External Documents without Sanitization"
+category = "INJECTION"
+severity = "MEDIUM"
+confidence = 0.5
+cwe_id = "CWE-1427"
+languages = [".py", ".ts", ".js"]
+patterns = [
+    "(?:fetch|requests\\.get)\\s*\\([^)]+\\)\\s*\\.(?:text|content|json)\\s*\\)[^;]*\\.(?:add_documents|embed_documents|create_documents)",
+    "(?:vector_store|vectorstore)\\.add_texts\\s*\\(\\s*\\[?\\s*(?:requests\\.get|fetch)\\b",
+]
+description = "External URL content or user-uploaded documents ingested directly into RAG embeddings without instruction filtering. External documents can embed indirect prompt injections designed to hijack the model upon retrieval."
+fix_hint = "Sanitize external text by stripping instruction overrides, enforce document boundaries, and treat retrieved context as untrusted data."
+suggested_fix = "# Sanitize external text before embedding into vector store"
+
+[[rules]]
+# CWE-200: AI API Calls or Confidential System Prompts in Client-Side Code
+rule_id = "sast-ai-frontend-api-or-system-prompt"
+name = "AI Client Initialization or Confidential System Prompt in Frontend Code"
+category = "MISCONFIGURATION"
+severity = "LOW"
+confidence = 0.5
+cwe_id = "CWE-200"
+languages = [".ts", ".tsx", ".js", ".jsx", ".vue"]
+patterns = [
+    "(?:new\\s+OpenAI|new\\s+Anthropic)\\s*\\(\\s*\\{",
+    "system:\\s*['\"][A-Z][^'\"]{40,}['\"]",
+]
+description = "Direct AI provider client instantiation or hardcoded system prompt detected in client-side frontend code. Calling AI APIs from the browser exposes API keys, and client-side system prompts can be extracted by end users."
+fix_hint = "Move AI model invocations and system prompts to a protected server-side API route."
+suggested_fix = "# Move AI API calls to a server-side route (e.g. /api/chat)"

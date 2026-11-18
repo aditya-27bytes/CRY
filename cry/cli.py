@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -21,7 +22,10 @@ from cry.evals.benchmark import (
     run_model_benchmark,
     run_multi_model_benchmark,
 )
+from cry.exclusions import ExclusionStats
 from cry.models import Finding
+from cry.network_auth import get_or_create_authorization, verify_target_control
+from cry.network_ip import is_internal
 from cry.reporters.json_reporter import export_json_report
 from cry.reporters.markdown import export_markdown_report, export_network_markdown_report
 from cry.reporters.terminal import (
@@ -36,13 +40,15 @@ from cry.scanners.dependencies import DependencyScanner, scan_dependencies
 from cry.scanners.network import (
     audit_network_target,
     audit_project_network,
+    extract_host_and_port,
+    parse_port_list,
     scan_network_code_patterns,
 )
 from cry.scanners.sast import SASTScanner
 from cry.scanners.sast import scan_directory as scan_sast
 from cry.scanners.secrets import SecretsScanner
 from cry.scanners.secrets import scan_directory as scan_secrets
-from cry.triage.client import LLMClient
+from cry.system_health import collect_system_health, save_system_health_report
 from cry.triage.engine import TriageEngine
 
 app = typer.Typer(
@@ -197,15 +203,48 @@ def interactive_menu() -> None:
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "3":
-            net_target = Prompt.ask(
-                "[bold]Enter domain, IP, or '.' for project network discovery[/bold]",
-                default=".",
+            console.print()
+            console.print(
+                Panel.fit(
+                    "[bold cyan]Network & Host Intelligence[/bold cyan]\n\n"
+                    "  [1] Passive Project Network Footprint (Zero packets dispatched)\n"
+                    "  [2] Scan Local Service (--allow-local: localhost / private RFC-1918)\n"
+                    "  [3] Scan Authorized Public Host (Requires verified proof of control)\n"
+                    "  [4] Authorize Target Domain (Verify DNS TXT or HTTP well-known token)",
+                    border_style="cyan",
+                )
             )
-            net(target=net_target, markdown_output=None)
+            net_choice = Prompt.ask("Select option", choices=["1", "2", "3", "4"], default="1")
+            if net_choice == "1":
+                proj_path = Prompt.ask("Enter project directory", default=".")
+                net(target=proj_path, footprint=True)
+            elif net_choice == "2":
+                loc_target = Prompt.ask(
+                    "Enter local target (e.g. localhost, 127.0.0.1:8000)", default="localhost"
+                )
+                net(target=loc_target, allow_local=True)
+            elif net_choice == "3":
+                pub_target = Prompt.ask("Enter authorized public host (e.g. example.com)")
+                is_deep = Confirm.ask(
+                    "Enable deep port probe and legacy TLS review?", default=False
+                )
+                net(target=pub_target, deep=is_deep, yes=True)
+            elif net_choice == "4":
+                auth_target = Prompt.ask("Enter target host to verify proof of control")
+                net(target=auth_target, authorize=True)
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "4":
             check()
+            export_rep = Confirm.ask(
+                "\nGenerate a timestamped system health report file in reports/?",
+                default=False,
+            )
+            if export_rep:
+                rep_path = save_system_health_report(collect_system_health())
+                console.print(
+                    f"\n[bold green]📄 System health report generated:[/bold green] [cyan]{rep_path}[/cyan]"
+                )
             Prompt.ask("\n[dim]Press Enter to return to menu...[/dim]")
 
         elif choice == "5":
@@ -273,64 +312,116 @@ def configure_wizard() -> None:
     masked_key = (
         f"{current_key[:6]}...{current_key[-4:]}" if len(current_key) > 10 else "(not configured)"
     )
-    console.print(f"Current API Key: [cyan]{masked_key}[/cyan]")
-    console.print(f"Current Base URL: [cyan]{settings.LLM_BASE_URL}[/cyan]")
-    console.print(f"Current Model:    [cyan]{settings.LLM_MODEL}[/cyan]\n")
-
-    mode = Prompt.ask(
-        "Choose setup mode",
-        choices=["groq", "ollama", "custom", "cancel"],
-        default="groq",
+    console.print(f"Current Primary Key:      [cyan]{masked_key}[/cyan]")
+    console.print(f"Current Primary Base URL: [cyan]{settings.LLM_BASE_URL}[/cyan]")
+    console.print(f"Current Primary Model:    [cyan]{settings.LLM_MODEL}[/cyan]")
+    console.print(
+        f"Current Failover Mode:    [cyan]{'Enabled (CRY_FAILOVER=on)' if settings.FAILOVER_ENABLED else 'Disabled (CRY_FAILOVER=off)'}[/cyan]\n"
     )
 
-    if mode == "groq":
-        key = Prompt.ask("Enter Groq API Key (from https://console.groq.com)")
-        if key:
-            content = f"""# CRY Configuration
-CRY_LLM_BASE_URL=https://api.groq.com/openai/v1
-CRY_LLM_API_KEY={key}
-CRY_LLM_MODEL=llama-3.1-8b-instant
-CRY_LLM_FALLBACK_MODELS=qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b,llama-3.3-70b-versatile
-"""
-            env_path.write_text(content, encoding="utf-8")
-            console.print(f"[bold green]Saved configuration to {env_path}[/bold green]")
-            # Live verification ping
-            with console.status("[bold cyan]Verifying Groq API connection...[/bold cyan]"):
-                client = LLMClient(api_key=key, model="llama-3.1-8b-instant")
-                try:
-                    asyncio.run(
-                        client.chat_completion_json(
-                            system_prompt='Return JSON: {"status": "ok"}',
-                            user_prompt="ping",
-                        )
-                    )
-                    console.print(
-                        "[bold green]✅ Groq connection verified successfully![/bold green]"
-                    )
-                except Exception as e:
-                    console.print(
-                        f"[bold yellow]⚠️ Saved, but verification ping failed: {e}[/bold yellow]"
-                    )
+    mode = Prompt.ask(
+        "Choose primary setup mode",
+        choices=["groq", "openrouter", "ollama", "custom", "cancel"],
+        default="groq",
+    )
+    if mode == "cancel":
+        console.print("[dim]Configuration cancelled.[/dim]")
+        return
 
+    primary_url = ""
+    primary_key = ""
+    primary_model = ""
+
+    if mode == "groq":
+        primary_url = "https://api.groq.com/openai/v1"
+        primary_key = Prompt.ask(
+            "Enter Groq API Key (from https://console.groq.com)", password=True
+        )
+        primary_model = "llama-3.1-8b-instant"
+    elif mode == "openrouter":
+        primary_url = "https://openrouter.ai/api/v1"
+        primary_key = Prompt.ask(
+            "Enter OpenRouter API Key (from https://openrouter.ai/keys)", password=True
+        )
+        primary_model = Prompt.ask(
+            "Enter model identifier", default="meta-llama/llama-3.3-70b-instruct"
+        )
     elif mode == "ollama":
-        model_name = Prompt.ask("Enter local model name in Ollama", default="llama3.3:70b")
-        content = f"""# CRY Configuration (Local Ollama)
-CRY_LLM_BASE_URL=http://localhost:11434/v1
-CRY_LLM_API_KEY=ollama
-CRY_LLM_MODEL={model_name}
-"""
-        env_path.write_text(content, encoding="utf-8")
-        console.print(f"[bold green]Saved offline configuration to {env_path}[/bold green]")
+        primary_url = "http://localhost:11434/v1"
+        primary_key = "ollama"
+        primary_model = Prompt.ask("Enter local model name in Ollama", default="llama3.3:70b")
+    elif mode == "custom":
+        primary_url = Prompt.ask(
+            "Enter OpenAI-compatible base URL", default="http://localhost:8000/v1"
+        )
+        primary_key = Prompt.ask(
+            "Enter API Key (press Enter if local/none)", password=True, default=""
+        )
+        primary_model = Prompt.ask("Enter model identifier", default="custom-model")
+
+    # Secondary Provider Configuration
+    secondary_url = ""
+    secondary_key = ""
+    secondary_model = ""
+    sec_choice = Prompt.ask(
+        "Configure secondary backup provider for automatic failover?",
+        choices=["none", "openrouter", "custom"],
+        default="none",
+    )
+    if sec_choice == "openrouter":
+        secondary_url = "https://openrouter.ai/api/v1"
+        secondary_key = Prompt.ask("Enter secondary OpenRouter API Key", password=True)
+        secondary_model = Prompt.ask(
+            "Enter secondary model identifier", default="meta-llama/llama-3.3-70b-instruct"
+        )
+    elif sec_choice == "custom":
+        secondary_url = Prompt.ask("Enter secondary base URL")
+        secondary_key = Prompt.ask("Enter secondary API Key", password=True, default="")
+        secondary_model = Prompt.ask("Enter secondary model identifier")
+
+    failover_toggle = Prompt.ask(
+        "Enable automatic model failover on rate limits or downtime? (CRY_FAILOVER)",
+        choices=["on", "off"],
+        default="on" if sec_choice != "none" else "off",
+    )
+
+    env_lines = [
+        "# CRY Security Configuration",
+        f"CRY_LLM_BASE_URL={primary_url}",
+        f"CRY_LLM_API_KEY={primary_key}",
+        f"CRY_LLM_MODEL={primary_model}",
+        "CRY_LLM_FALLBACK_MODELS=qwen/qwen3.8-27b,openai/gpt-oss-20b,openai/gpt-oss-120b,llama-3.3-70b-versatile",
+    ]
+    if secondary_url:
+        env_lines.append(f"CRY_SECONDARY_BASE_URL={secondary_url}")
+        env_lines.append(f"CRY_SECONDARY_API_KEY={secondary_key}")
+        env_lines.append(f"CRY_SECONDARY_MODEL={secondary_model}")
+    env_lines.append(f"CRY_FAILOVER={failover_toggle}")
+
+    env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+    console.print(f"[bold green]Saved configuration to {env_path}[/bold green]")
+
+    if settings.is_local_endpoint(primary_url):
+        console.print(
+            "[bold cyan]🛡️ Privacy Guard Note:[/bold cyan] [dim]Primary is a local endpoint. "
+            "Privacy Guard will block sending code to cloud failover providers.[/dim]"
+        )
 
 
 @app.command()
 def guide() -> None:
     """Print the quickstart guide and CLI command cheat sheet."""
-    guide_table = Table(title="CRY CLI Command Reference", border_style="cyan")
-    guide_table.add_column("Command", style="bold cyan")
-    guide_table.add_column("What it does")
-    guide_table.add_column("Example", style="dim")
+    guide_table = Table(
+        title="CRY CLI Command Reference (v0.4)",
+        border_style="cyan",
+        show_lines=True,
+        expand=True,
+    )
+    guide_table.add_column("Command", style="bold cyan", width=32)
+    guide_table.add_column("What it does", ratio=2)
+    guide_table.add_column("Example", style="dim", ratio=2)
 
+    # Core Code Scanners
     guide_table.add_row("cry", "Opens the interactive welcome menu", "cry")
     guide_table.add_row("cry scan", "Scans current directory with intelligent defaults", "cry scan")
     guide_table.add_row(
@@ -352,22 +443,51 @@ def guide() -> None:
         "cry scan https://github.com/OWASP/NodeGoat",
     )
     guide_table.add_row(
+        "cry scan --exclude <globs>",
+        "Exclude paths/files from scanning (in addition to .cryignore)",
+        'cry scan --exclude "tests/**,vendor/**"',
+    )
+    guide_table.add_row(
         "cry scan --no-ai", "Fast offline scan without calling LLM", "cry scan --no-ai"
     )
     guide_table.add_row(
         "cry scan -m <file>", "Exports findings to Markdown", "cry scan -m AUDIT.md"
     )
     guide_table.add_row("cry scan -o <file>", "Exports findings to JSON", "cry scan -o report.json")
+
+    # Network & Host Intelligence
     guide_table.add_row(
         "cry net",
-        "Automated project network footprint discovery & IP resolution",
-        "cry net",
+        "Passive project network footprint discovery (zero packets sent)",
+        "cry net .",
+    )
+    guide_table.add_row(
+        "cry net <target> --allow-local",
+        "Audit local dev server or RFC-1918 internal host (localhost, 127.0.0.1)",
+        "cry net http://localhost:3000/ --allow-local",
+    )
+    guide_table.add_row(
+        "cry net <target> --authorize",
+        "Verify public host ownership token via DNS TXT or HTTP well-known challenge",
+        "cry net my-saas.com --authorize",
     )
     guide_table.add_row(
         "cry net <target>",
-        "Live IP lookup, DNS, SSL/TLS, and HTTP security headers audit",
-        "cry net google.com",
+        "Authorized live audit: DNS, ports, database exposure, TLS & security headers",
+        "cry net my-saas.com",
     )
+    guide_table.add_row(
+        "cry net <target> --deep",
+        "Deep network scan: extended ports (28 probed) & legacy TLS 1.0/1.1 checks",
+        "cry net my-saas.com --deep",
+    )
+    guide_table.add_row(
+        "cry net <target> -p <ports>",
+        "Probe specific ports or port ranges (capped at 100 ports)",
+        "cry net my-saas.com -p 80,443,8000-8010",
+    )
+
+    # Benchmarking & Rule Catalog
     guide_table.add_row(
         "cry eval",
         "Benchmark AI model or offline baseline on ground truth",
@@ -388,10 +508,23 @@ def guide() -> None:
         "Validate regex syntax and sample matches for all rules",
         "cry rules test",
     )
+
+    # Setup & Readiness
     guide_table.add_row(
-        "cry configure", "Launch interactive wizard to set up LLM API keys", "cry configure"
+        "cry configure",
+        "Launch interactive wizard to set up primary & failover LLM keys",
+        "cry configure",
     )
-    guide_table.add_row("cry check", "Checks system readiness and API keys", "cry check")
+    guide_table.add_row(
+        "cry check",
+        "Checks readiness, scanner engines, API keys & host system health",
+        "cry check",
+    )
+    guide_table.add_row(
+        "cry check --report",
+        "Generate & persist timestamped system health report to reports/",
+        "cry check --report",
+    )
     guide_table.add_row("cry guide", "Displays this help cheat sheet", "cry guide")
     guide_table.add_row("cry version", "Prints the current version of CRY", "cry version")
 
@@ -404,33 +537,134 @@ def version() -> None:
     console.print(f"[bold cyan]CRY[/bold cyan] version [green]{__version__}[/green]")
 
 
+def _probe_provider_models(base_url: str, api_key: str | None) -> tuple[bool, list[str], str]:
+    """Query GET {base_url}/models to inspect model availability."""
+    clean_url = base_url.rstrip("/")
+    url = f"{clean_url}/models"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if "openrouter.ai" in clean_url.lower():
+        headers["HTTP-Referer"] = "https://github.com/aditya-27bytes/CRY"
+        headers["X-Title"] = "CRY Security Scanner"
+    try:
+        with httpx.Client(timeout=3.0) as client:
+            resp = client.get(url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_list = data.get("data", data.get("models", []))
+                model_ids: list[str] = []
+                for item in raw_list:
+                    if isinstance(item, dict) and "id" in item:
+                        model_ids.append(str(item["id"]))
+                    elif isinstance(item, dict) and "name" in item:
+                        model_ids.append(str(item["name"]))
+                    elif isinstance(item, str):
+                        model_ids.append(item)
+                return True, model_ids, f"{len(model_ids)} model(s) available"
+            elif resp.status_code == 401:
+                return False, [], "Authentication failed (HTTP 401 Unauthorized)"
+            else:
+                return False, [], f"HTTP {resp.status_code}"
+    except httpx.RequestError as e:
+        return False, [], f"Unreachable: {e}"
+    except Exception as e:
+        return False, [], str(e)
+
+
 @app.command()
-def check() -> None:
-    """Check your environment, LLM configuration, and scanner readiness."""
-    table = Table(title="CRY Environment Health Check")
+def check(
+    report: bool = typer.Option(
+        False,
+        "--report",
+        "-r",
+        help="Generate and save a timestamped host & system health report to reports/",
+    ),
+) -> None:
+    """Check your environment, LLM configuration, scanner readiness, and host system health."""
+    table = Table(title="CRY Environment Health Check", border_style="cyan")
     table.add_column("Component", style="bold")
     table.add_column("Status", style="bold")
     table.add_column("Details")
 
-    # Check LLM Endpoint
+    # 1. Primary LLM Provider & Model Validation
     if settings.is_local_llm():
+        ok, models, msg = _probe_provider_models(settings.LLM_BASE_URL, settings.LLM_API_KEY)
+        if ok and settings.LLM_MODEL in models:
+            model_status = f"[green]VERIFIED ({settings.LLM_MODEL})[/green]"
+        elif ok:
+            model_status = (
+                f"[yellow]UNCONFIRMED ({settings.LLM_MODEL} not in provider catalog)[/yellow]"
+            )
+        else:
+            model_status = f"[dim]LOCAL ({msg})[/dim]"
         table.add_row(
-            "LLM Provider",
+            "Primary LLM",
             "[green]LOCAL (PRIVATE)[/green]",
-            f"Endpoint: {settings.LLM_BASE_URL} | Model: {settings.LLM_MODEL}",
+            f"Endpoint: {settings.LLM_BASE_URL} | Model: {model_status}",
         )
     elif settings.has_valid_llm_config():
+        ok, models, msg = _probe_provider_models(settings.LLM_BASE_URL, settings.LLM_API_KEY)
+        if ok and settings.LLM_MODEL in models:
+            model_status = f"[green]VERIFIED ({settings.LLM_MODEL})[/green]"
+        elif ok:
+            model_status = f"[yellow]UNCONFIRMED ({settings.LLM_MODEL} not in catalog)[/yellow]"
+        else:
+            model_status = f"[yellow]CHECK FAILED ({msg})[/yellow]"
         table.add_row(
-            "LLM Provider",
+            "Primary LLM",
             "[green]CLOUD (API)[/green]",
-            f"Endpoint: {settings.LLM_BASE_URL} | Model: {settings.LLM_MODEL}",
+            f"Endpoint: {settings.LLM_BASE_URL} | Model: {model_status}",
         )
     else:
         table.add_row(
-            "LLM Provider",
+            "Primary LLM",
             "[yellow]NOT CONFIGURED[/yellow]",
             "Set CRY_LLM_API_KEY in .env (or point CRY_LLM_BASE_URL to "
             "http://localhost:11434/v1 for Ollama)",
+        )
+
+    # 2. Secondary Failover Provider
+    if settings.has_valid_secondary_config():
+        ok_sec, sec_models, sec_msg = _probe_provider_models(
+            settings.SECONDARY_BASE_URL, settings.SECONDARY_API_KEY
+        )
+        if ok_sec and settings.SECONDARY_MODEL in sec_models:
+            sec_status = f"[green]VERIFIED ({settings.SECONDARY_MODEL})[/green]"
+        elif ok_sec:
+            sec_status = f"[yellow]UNCONFIRMED ({settings.SECONDARY_MODEL} not in catalog)[/yellow]"
+        else:
+            sec_status = f"[dim]CONFIGURED ({sec_msg})[/dim]"
+        table.add_row(
+            "Secondary LLM",
+            "[green]CONFIGURED[/green]",
+            f"Endpoint: {settings.SECONDARY_BASE_URL} | Model: {sec_status}",
+        )
+    else:
+        table.add_row(
+            "Secondary LLM",
+            "[dim]NOT CONFIGURED[/dim]",
+            "Optional failover provider (set CRY_SECONDARY_API_KEY for OpenRouter / custom)",
+        )
+
+    # 3. Privacy Guard Status
+    if settings.is_local_llm():
+        table.add_row(
+            "Privacy Guard",
+            "[bold green]ACTIVE (ENFORCED)[/bold green]",
+            "Localhost isolated. Cloud failover strictly blocked to prevent data exfiltration.",
+        )
+    elif settings.FAILOVER_ENABLED and settings.has_valid_secondary_config():
+        table.add_row(
+            "Privacy Guard",
+            "[bold green]FAILOVER ENABLED[/bold green]",
+            f"Cloud-to-cloud failover active (CRY_FAILOVER=on) -> {settings.SECONDARY_BASE_URL}",
+        )
+    else:
+        table.add_row(
+            "Privacy Guard",
+            "[dim]STANDALONE[/dim]",
+            "Single provider mode (Failover is off; set CRY_FAILOVER=on to enable)",
         )
 
     # Scanners status
@@ -451,8 +685,124 @@ def check() -> None:
         "[green]READY[/green]",
         "Repository hygiene, .gitignore coverage, and Docker security",
     )
+    table.add_row(
+        "Network & Host",
+        "[green]READY[/green]",
+        "Passive discovery, active DNS/ports/TLS/headers & IMDS guard",
+    )
 
     console.print(table)
+    console.print()
+
+    # 4. Host & Linux System Health Monitor Telemetry
+    sys_health = collect_system_health()
+
+    status_color = (
+        "green"
+        if sys_health.overall_status == "NOMINAL"
+        else ("yellow" if sys_health.overall_status == "WARNING" else "red")
+    )
+    sys_table = Table(
+        title=f"🐧 Host & Linux System Health Monitor  [bold {status_color}][Status: {sys_health.overall_status}][/bold {status_color}]",
+        border_style="cyan",
+        show_lines=True,
+        expand=True,
+    )
+    sys_table.add_column("Telemetry Metric", style="bold cyan", width=22)
+    sys_table.add_column("Observed Value", style="bold")
+    sys_table.add_column("Health Status / Details", style="dim")
+
+    sys_table.add_row(
+        "Hostname & User",
+        f"{sys_health.hostname} ({sys_health.logged_user})",
+        "[green]Active Local Session[/green]",
+    )
+    sys_table.add_row(
+        "OS Platform",
+        sys_health.os_platform,
+        "[dim]Host kernel & architecture[/dim]",
+    )
+    sys_table.add_row(
+        "Date & Time",
+        sys_health.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "[dim]Synchronized UTC timestamp[/dim]",
+    )
+    sys_table.add_row(
+        "System Uptime",
+        f"{sys_health.uptime_formatted} ({sys_health.uptime_seconds:,}s)",
+        (
+            "[green]Operating without interruption[/green]"
+            if sys_health.uptime_seconds > 0
+            else "[dim]Available[/dim]"
+        ),
+    )
+    sys_table.add_row(
+        "System Load Averages",
+        sys_health.load_averages,
+        "[dim]1m, 5m, 15m CPU run queue[/dim]",
+    )
+    cpu_val = (
+        f"{sys_health.cpu_utilization_pct:.1f}%"
+        if sys_health.cpu_utilization_pct is not None
+        else "Sampling..."
+    )
+    sys_table.add_row(
+        "CPU Load & Cores",
+        f"{cpu_val} across {sys_health.cpu_cores} core(s)",
+        (
+            "[green]Nominal CPU utilization[/green]"
+            if (sys_health.cpu_utilization_pct is None or sys_health.cpu_utilization_pct < 85)
+            else "[yellow]High CPU load[/yellow]"
+        ),
+    )
+    sys_table.add_row(
+        "Memory (RAM)",
+        f"{sys_health.ram_used_gb:.2f} GB / {sys_health.ram_total_gb:.2f} GB ({sys_health.ram_percent:.1f}% used)",
+        (
+            "[green]Healthy memory headroom[/green]"
+            if sys_health.ram_percent < 85
+            else "[yellow]Elevated memory consumption[/yellow]"
+        ),
+    )
+    sys_table.add_row(
+        "Disk Storage",
+        f"{sys_health.disk_used_gb:.1f} GB / {sys_health.disk_total_gb:.1f} GB ({sys_health.disk_percent:.1f}% used)",
+        f"{sys_health.disk_free_gb:.1f} GB free on root filesystem",
+    )
+    sys_table.add_row(
+        "Active Processes",
+        f"{sys_health.process_count} running process(es)",
+        "[dim]System execution thread pool[/dim]",
+    )
+    net_style = (
+        "[green]ONLINE[/green]"
+        if sys_health.network_connected
+        else "[yellow]OFFLINE / LOCAL[/yellow]"
+    )
+    sys_table.add_row(
+        "Network Connectivity",
+        sys_health.network_status_msg,
+        net_style,
+    )
+
+    alert_summary = (
+        f"[yellow]{'; '.join(sys_health.alerts)}[/yellow]"
+        if sys_health.alerts
+        else "[green]All monitored thresholds nominal (healthy)[/green]"
+    )
+    sys_table.add_row(
+        "Proactive Health Alerts",
+        alert_summary,
+        f"Threshold Evaluation: [{status_color}]{sys_health.overall_status}[/{status_color}]",
+    )
+
+    console.print(sys_table)
+
+    if report:
+        report_file = save_system_health_report(sys_health)
+        console.print(
+            f"\n[bold green]📄 Timestamped system health report generated:[/bold green] [cyan]{report_file}[/cyan]"
+        )
 
 
 @app.command()
@@ -499,11 +849,17 @@ def scan(
         "--api-key",
         help="API key for custom model endpoint",
     ),
+    include_vendor: bool = typer.Option(
+        False,
+        "--include-vendor",
+        help="Include vendor, minified, bundled, and gitignored files in the scan",
+    ),
 ) -> None:
     """Scan a codebase, single file, or public Git repo for secrets & vulnerabilities."""
     target = str(_unwrap_param(target, "."))
     full = bool(_unwrap_param(full, False))
     no_ai = bool(_unwrap_param(no_ai, False))
+    include_vendor = bool(_unwrap_param(include_vendor, False))
     json_output = _unwrap_param(json_output, None)
     markdown_output = _unwrap_param(markdown_output, None)
     model = _unwrap_param(model, None)
@@ -626,6 +982,7 @@ def scan(
             markdown_output=markdown_output,
             start_time=start_time,
             is_full_scan=is_full_scan,
+            include_vendor=include_vendor,
         )
 
 
@@ -635,6 +992,11 @@ def full(
         False,
         "--no-ai",
         help="Skip AI triage and output deep rule-based heuristic findings",
+    ),
+    include_vendor: bool = typer.Option(
+        False,
+        "--include-vendor",
+        help="Include vendor, minified, bundled, and gitignored files in the scan",
     ),
     json_output: Path | None = typer.Option(
         None,
@@ -666,6 +1028,7 @@ def full(
 ) -> None:
     """Scan the entire project for all vulnerabilities, secrets, dependencies, and configuration flaws."""
     no_ai = bool(_unwrap_param(no_ai, False))
+    include_vendor = bool(_unwrap_param(include_vendor, False))
     json_output = _unwrap_param(json_output, None)
     markdown_output = _unwrap_param(markdown_output, None)
     model = _unwrap_param(model, None)
@@ -676,6 +1039,7 @@ def full(
         target=".",
         full=True,
         no_ai=no_ai,
+        include_vendor=include_vendor,
         json_output=json_output,
         markdown_output=markdown_output,
         model=model,
@@ -690,6 +1054,39 @@ def net(
         ".",
         help="Domain name, IP address, URL, or '.' for automated project network footprint & IP discovery",
     ),
+    footprint: bool = typer.Option(
+        False,
+        "--footprint",
+        "-f",
+        help="Passive network footprint: scans codebase for URLs/IPs without sending network packets",
+    ),
+    deep: bool = typer.Option(
+        False,
+        "--deep",
+        help="Perform deep active port probe and legacy TLS protocol review",
+    ),
+    ports: str | None = typer.Option(
+        None,
+        "--ports",
+        "-p",
+        help="Comma-separated port numbers or ranges (e.g. '80,443,8000-8010', max 100 ports)",
+    ),
+    allow_local: bool = typer.Option(
+        False,
+        "--allow-local",
+        help="Explicitly allow active probing of localhost, 127.0.0.1, or private RFC-1918 addresses",
+    ),
+    authorize: bool = typer.Option(
+        False,
+        "--authorize",
+        help="Verify proof-of-control for target domain via DNS TXT or HTTP well-known challenge",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Confirm execution of deep active network scan without interactive prompt",
+    ),
     markdown_output: Path | None = typer.Option(
         None,
         "--markdown",
@@ -697,18 +1094,91 @@ def net(
         help="Path to export network intelligence report as Markdown (e.g. -m NET_REPORT.md)",
     ),
 ) -> None:
-    """Perform live IP lookup, DNS, SSL/TLS, or project-wide network footprint discovery."""
+    """Perform passive network footprint discovery (default) or authorized live host security analysis."""
     target = str(_unwrap_param(target, "."))
+    footprint = bool(_unwrap_param(footprint, False))
+    deep = bool(_unwrap_param(deep, False))
+    ports = _unwrap_param(ports, None)
+    allow_local = bool(_unwrap_param(allow_local, False))
+    authorize = bool(_unwrap_param(authorize, False))
+    yes = bool(_unwrap_param(yes, False))
     markdown_output = _unwrap_param(markdown_output, None)
 
-    is_project = target == "." or Path(target).is_dir()
-    msg = (
-        f"Auditing project network footprint in {target}..."
-        if is_project
-        else f"Running network security audit on {target}..."
-    )
-    with console.status(f"[bold cyan]{msg}[/bold cyan]"):
-        report = audit_project_network(Path(target)) if is_project else audit_network_target(target)
+    # 1. Handle Target Authorization Request (--authorize)
+    if authorize:
+        clean_host, custom_port = extract_host_and_port(target)
+        console.print(f"[bold cyan]Verifying target ownership for '{clean_host}'...[/bold cyan]")
+        with console.status(
+            "[bold cyan]Checking DNS TXT records and HTTP well-known path...[/bold cyan]"
+        ):
+            verified, msg = verify_target_control(clean_host, port=custom_port)
+        if verified:
+            console.print(f"\n[bold green]✅ Authorization Verified:[/bold green] {msg}")
+            console.print(f"[dim]Target '{clean_host}' is now authorized for active scans.[/dim]\n")
+        else:
+            rec = get_or_create_authorization(clean_host)
+            console.print(f"\n[bold red]❌ Verification Failed:[/bold red] {msg}\n")
+            console.print(f"[bold]Target Host:[/bold] {clean_host}")
+            if custom_port:
+                console.print(f"[bold]Target Port:[/bold] {custom_port}")
+            console.print(f"[bold]Verification Token:[/bold] [bold cyan]{rec.token}[/bold cyan]\n")
+            console.print("To prove ownership, configure either:")
+            console.print(
+                f"  1. [bold]DNS TXT Record:[/bold] Add a TXT record for '{clean_host}' with value:"
+            )
+            console.print(f"     [cyan]cry-verification={rec.token}[/cyan]")
+
+            example_url = (
+                f"http://{clean_host}:{custom_port}/.well-known/cry-challenge.txt"
+                if custom_port
+                else f"https://{clean_host}/.well-known/cry-challenge.txt"
+            )
+            console.print(
+                f"  2. [bold]HTTP File / Route:[/bold] Return the token from '{example_url}' containing:"
+            )
+            console.print(f"     [cyan]{rec.token}[/cyan]\n")
+
+            if is_internal(clean_host):
+                console.print(
+                    "[bold yellow]💡 Tip for Local Development:[/bold yellow] [dim]'localhost' and private subnets do not require domain authorization.\n"
+                    "   You can audit your local development server directly with:[/dim]\n"
+                    f"   [bold green]cry net {target} --allow-local[/bold green]\n"
+                )
+
+            console.print(f"Then rerun: [bold green]cry net {target} --authorize[/bold green]\n")
+        return
+
+    # 2. Handle Project Footprint Analysis (Passive, Zero Packets)
+    is_project = footprint or target == "." or Path(target).is_dir()
+    report: Any
+    if is_project:
+        target_path = Path(target if target != "." else ".")
+        with console.status(
+            f"[bold cyan]Scanning project network footprint in {target_path} (passive, zero network packets)...[/bold cyan]"
+        ):
+            report = audit_project_network(target_path, passive=True)
+    else:
+        # 3. Handle Live Active Network Scan
+        if deep and not yes:
+            confirmed = Confirm.ask(
+                f"[bold yellow]Run deep active network probe against {target}?[/bold yellow]\n"
+                "This will probe extended ports and legacy TLS handshakes. Proceed?",
+                default=True,
+            )
+            if not confirmed:
+                console.print("[dim]Aborted deep scan.[/dim]")
+                return
+
+        port_list = parse_port_list(ports) if ports else None
+        with console.status(
+            f"[bold cyan]Running authorized active network audit on {target}...[/bold cyan]"
+        ):
+            report = audit_network_target(
+                target,
+                allow_local=allow_local,
+                deep=deep,
+                ports=port_list,
+            )
 
     print_network_report(report)
 
@@ -892,14 +1362,26 @@ def _execute_scan(
     markdown_output: Path | None,
     start_time: float,
     is_full_scan: bool = False,
+    include_vendor: bool = False,
 ) -> None:
     """Internal helper to scan directory and run triage."""
+    exclusion_stats = ExclusionStats()
     with console.status("[bold cyan]Scanning for leaked secrets...[/bold cyan]"):
-        secret_findings = scan_secrets(scan_dir, settings.MAX_FILE_SIZE_MB)
+        secret_findings = scan_secrets(
+            scan_dir,
+            settings.MAX_FILE_SIZE_MB,
+            include_vendor=include_vendor,
+            stats=exclusion_stats,
+        )
     console.print(f"  [dim]• Secrets scanner:[/dim]        {len(secret_findings)} finding(s)")
 
     with console.status("[bold cyan]Scanning for code vulnerabilities...[/bold cyan]"):
-        sast_findings = scan_sast(scan_dir, settings.MAX_FILE_SIZE_MB)
+        sast_findings = scan_sast(
+            scan_dir,
+            settings.MAX_FILE_SIZE_MB,
+            include_vendor=include_vendor,
+            stats=exclusion_stats,
+        )
     console.print(f"  [dim]• SAST scanner:[/dim]           {len(sast_findings)} finding(s)")
 
     all_findings = secret_findings + sast_findings
@@ -920,11 +1402,18 @@ def _execute_scan(
         with console.status(
             "[bold cyan]Auditing network endpoints & SSRF attack vectors...[/bold cyan]"
         ):
-            net_findings = scan_network_code_patterns(scan_dir)
+            net_findings = scan_network_code_patterns(
+                scan_dir, include_vendor=include_vendor, stats=exclusion_stats
+            )
         console.print(f"  [dim]• Network & SSRF scanner:[/dim] {len(net_findings)} finding(s)")
 
         all_findings = (
             secret_findings + sast_findings + sca_findings + config_findings + net_findings
+        )
+
+    if exclusion_stats.total_skipped > 0:
+        console.print(
+            f"  [dim]• Excluded files:[/dim]         {exclusion_stats.format_summary()} [dim](use --include-vendor to scan)[/dim]"
         )
 
     _run_triage_and_report(
@@ -935,6 +1424,7 @@ def _execute_scan(
         json_output=json_output,
         markdown_output=markdown_output,
         start_time=start_time,
+        exclusion_stats=exclusion_stats,
     )
 
 
@@ -946,6 +1436,7 @@ def _run_triage_and_report(
     json_output: Path | None,
     markdown_output: Path | None,
     start_time: float,
+    exclusion_stats: ExclusionStats | None = None,
 ) -> None:
     """Run AI or heuristic triage, print verdict, and export reports."""
     triage_engine = TriageEngine()
@@ -959,6 +1450,11 @@ def _run_triage_and_report(
 
     report.target = display_target
     report.scan_duration_seconds = round(time.time() - start_time, 2)
+    if exclusion_stats and exclusion_stats.total_skipped > 0:
+        report.skipped_files_count = exclusion_stats.total_skipped
+        report.skipped_files_summary = exclusion_stats.format_summary()
+        if report.skipped_files_summary not in report.summary:
+            report.summary += f" [Excluded: {report.skipped_files_summary}.]"
 
     # Print Report
     print_verdict_report(report)

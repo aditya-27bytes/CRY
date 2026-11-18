@@ -119,6 +119,19 @@ class TokenUsage(BaseModel):
     estimated_cost_usd: float = 0.0
 
 
+class FailoverEvent(BaseModel):
+    """Detailed telemetry record for an LLM model or provider failover event."""
+
+    provider: str = Field(description="Name or URL of the provider that handled the request")
+    model: str = Field(description="Model name that handled the request")
+    reason: str = Field(
+        description="Trigger reason (e.g. HTTP 429 Rate Limit, HTTP 503 Unavailable)"
+    )
+    findings_handled: int = Field(
+        default=0, description="Number of findings triaged by this provider"
+    )
+
+
 class VerdictReport(BaseModel):
     """The final executive report delivered to the developer."""
 
@@ -145,6 +158,16 @@ class VerdictReport(BaseModel):
     model_switches: list[str] = Field(
         default_factory=list,
         description="Record of model failovers/switches due to rate limits or availability",
+    )
+    failover_events: list[FailoverEvent] = Field(
+        default_factory=list,
+        description="Detailed record of provider failovers including provider, reason, and findings count",
+    )
+    skipped_files_count: int = Field(
+        default=0, description="Total number of excluded vendor, minified, or gitignored files"
+    )
+    skipped_files_summary: str | None = Field(
+        default=None, description="Summary and breakdown of skipped/excluded files"
     )
 
 
