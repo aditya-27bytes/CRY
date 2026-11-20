@@ -1,5 +1,6 @@
 """Terminal reporting for CRY scan and triage verdicts."""
 
+from collections import Counter
 from typing import Any
 
 from rich.console import Console
@@ -11,8 +12,22 @@ from cry.models import Verdict, VerdictReport
 console = Console()
 
 
-def print_verdict_report(report: VerdictReport) -> None:
-    """Render a comprehensive, developer-friendly terminal report."""
+def print_verdict_report(
+    report: VerdictReport,
+    all_findings: bool = False,
+    max_detailed_blockers: int = 5,
+    max_compact_warnings: int = 10,
+    max_false_positives: int = 5,
+) -> None:
+    """Render a comprehensive, developer-friendly terminal report.
+
+    Provides a clean, scannable layout designed for terminal viewports:
+    - Headline verdict banner
+    - Detailed blocker cards with code snippets and copy-paste replacements
+    - Compact, high-density table for advisory warnings (preventing scroll blowout)
+    - Grouped summary of remaining warnings when count > 10 (unless all_findings=True)
+    - Actionable verdict summary card at the bottom above the shell prompt
+    """
     console.print()
 
     # 1. Headline Verdict Banner
@@ -60,9 +75,17 @@ def print_verdict_report(report: VerdictReport) -> None:
 
     # 2. Blockers Section (Must Fix)
     if report.blockers:
+        total_blockers = len(report.blockers)
+        if all_findings or total_blockers <= max_detailed_blockers:
+            detailed_blockers = report.blockers
+            remaining_blockers = []
+        else:
+            detailed_blockers = report.blockers[:max_detailed_blockers]
+            remaining_blockers = report.blockers[max_detailed_blockers:]
+
         console.print()
         table = Table(
-            title=f"🚨 Critical Blockers ({len(report.blockers)} issue{'s' if len(report.blockers) != 1 else ''})",
+            title=f"🚨 Critical Blockers ({total_blockers} issue{'s' if total_blockers != 1 else ''})",
             border_style="red",
             show_lines=True,
             expand=True,
@@ -72,7 +95,7 @@ def print_verdict_report(report: VerdictReport) -> None:
         table.add_column("Location", style="cyan", width=22)
         table.add_column("Plain-English Explanation & Fix", ratio=1)
 
-        for idx, item in enumerate(report.blockers, 1):
+        for idx, item in enumerate(detailed_blockers, 1):
             f = item.finding
             loc = f"{f.file_path}:{f.line_start}" if f.file_path else "—"
             cwe_str = f" ({f.cwe_id})" if f.cwe_id else ""
@@ -102,79 +125,192 @@ def print_verdict_report(report: VerdictReport) -> None:
 
         console.print(table)
 
-    # 3. Warnings Section
+        # If there are additional blockers beyond the detailed view
+        if remaining_blockers:
+            console.print()
+            rem_table = Table(
+                title=f"🚨 Additional Critical Blockers ({len(remaining_blockers)} more)",
+                border_style="red",
+                show_lines=True,
+                expand=True,
+            )
+            rem_table.add_column("#", width=3, style="dim")
+            rem_table.add_column("Rule & Flaw", style="bold red", width=24)
+            rem_table.add_column("Location", style="cyan", width=24)
+            rem_table.add_column("Problem & Recommended Fix", ratio=1)
+
+            compact_sub = (
+                remaining_blockers[:5]
+                if len(remaining_blockers) > 5 and not all_findings
+                else remaining_blockers
+            )
+            for sub_idx, item in enumerate(compact_sub, max_detailed_blockers + 1):
+                f = item.finding
+                loc = f"{f.file_path}:{f.line_start}" if f.file_path else "—"
+                cwe_str = f" ({f.cwe_id})" if f.cwe_id else ""
+                desc = item.plain_english_explanation
+                if item.fix_recommendation:
+                    desc += f"\n[dim green]💡 Fix: {item.fix_recommendation}[/dim green]"
+                rem_table.add_row(
+                    str(sub_idx),
+                    f"{f.title}{cwe_str}\n[dim]{f.tool}[/dim]",
+                    loc,
+                    desc,
+                )
+            console.print(rem_table)
+
+            if len(remaining_blockers) > 5 and not all_findings:
+                hidden_blockers = len(remaining_blockers) - 5
+                console.print(
+                    f"[bold red]🚨 ... and {hidden_blockers} more critical blocker{'s' if hidden_blockers != 1 else ''} omitted from terminal.[/bold red]"
+                )
+                console.print(
+                    "[dim]💡 Run with --all or export to -m AUDIT.md / -o report.json for full code diffs for all blockers.[/dim]"
+                )
+
+    # 3. Warnings Section (Compact, high-density table to prevent terminal overflow)
     if report.warnings:
+        total_warnings = len(report.warnings)
+        if all_findings or total_warnings <= max_compact_warnings:
+            displayed_warnings = report.warnings
+            omitted_warnings = []
+        else:
+            displayed_warnings = report.warnings[:max_compact_warnings]
+            omitted_warnings = report.warnings[max_compact_warnings:]
+
         console.print()
+        warn_title = (
+            f"⚠️ Warnings & Advisories ({total_warnings} item{'s' if total_warnings != 1 else ''})"
+            if not omitted_warnings
+            else f"⚠️ Warnings & Advisories (Showing top {len(displayed_warnings)} of {total_warnings})"
+        )
         table = Table(
-            title=f"⚠️ Warnings & Fixes ({len(report.warnings)} item{'s' if len(report.warnings) != 1 else ''})",
+            title=warn_title,
             border_style="yellow",
             show_lines=True,
             expand=True,
         )
         table.add_column("#", width=3, style="dim")
-        table.add_column("Issue", style="bold yellow", width=22)
-        table.add_column("Location", style="cyan", width=22)
-        table.add_column("Problem & Recommended Fix", ratio=1)
+        table.add_column("Issue & Tool", style="bold yellow", width=24)
+        table.add_column("Location", style="cyan", width=24)
+        table.add_column("Advisory & Recommended Fix", ratio=1)
 
-        for idx, item in enumerate(report.warnings, 1):
+        for idx, item in enumerate(displayed_warnings, 1):
             f = item.finding
             loc = f"{f.file_path}:{f.line_start}" if f.file_path else "—"
-            details = [
-                f"[bold]Problem:[/bold] {item.plain_english_explanation}",
-            ]
-            if f.code_snippet:
-                details.append(
-                    f"[bold yellow]⚠️ Flagged Code:[/bold yellow]\n[yellow]   {f.code_snippet}[/yellow]"
-                )
-
-            if item.exploitability_reasoning:
-                details.append(
-                    f"[bold yellow]🛡️ Risk Analysis & Impact:[/bold yellow] {item.exploitability_reasoning}"
-                )
-
-            details.append(f"[bold green]💡 How to fix:[/bold green] {item.fix_recommendation}")
-
-            if item.suggested_replacement_code:
-                details.append(
-                    f"[bold green]🟢 Replacement Code:[/bold green]\n[green]   {item.suggested_replacement_code}[/green]"
-                )
+            cwe_str = f" ({f.cwe_id})" if f.cwe_id else ""
+            desc = item.plain_english_explanation
+            if item.fix_recommendation:
+                desc += f"\n[dim green]💡 Fix: {item.fix_recommendation}[/dim green]"
 
             table.add_row(
                 str(idx),
-                f"{f.title}\n[dim]{f.tool}[/dim]",
+                f"{f.title}{cwe_str}\n[dim]{f.tool}[/dim]",
                 loc,
-                "\n".join(details),
+                desc,
             )
 
         console.print(table)
 
+        # Grouped breakdown for remaining warnings
+        if omitted_warnings:
+            console.print()
+            console.print(
+                f"[bold yellow]⚠️  ... and {len(omitted_warnings)} additional advisory warning{'s' if len(omitted_warnings) != 1 else ''} omitted from terminal view:[/bold yellow]"
+            )
+            counts = Counter(w.finding.title for w in omitted_warnings)
+            for title, count in counts.most_common(5):
+                console.print(
+                    f"   [dim]•[/dim] [yellow]{title}[/yellow] [dim]({count} occurrence{'s' if count != 1 else ''})[/dim]"
+                )
+            if len(counts) > 5:
+                console.print(
+                    f"   [dim]• ... and {len(counts) - 5} other advisory categories[/dim]"
+                )
+            console.print(
+                f"[dim]💡 Full vulnerability details, risk analysis & replacement code for all {total_warnings} "
+                "warnings are preserved in report exports (-m AUDIT.md or -o report.json). "
+                "Run with --all to display all in terminal.[/dim]"
+            )
+
     # 4. Transparent False Positives Section
     if report.likely_false_positives:
+        total_fps = len(report.likely_false_positives)
+        if all_findings or total_fps <= max_false_positives:
+            displayed_fps = report.likely_false_positives
+            omitted_fps_count = 0
+        else:
+            displayed_fps = report.likely_false_positives[:max_false_positives]
+            omitted_fps_count = total_fps - max_false_positives
+
         console.print()
         table = Table(
-            title=f"🔍 Likely False Positives ({len(report.likely_false_positives)} item{'s' if len(report.likely_false_positives) != 1 else ''} — kept visible for full transparency)",
+            title=f"🔍 Likely False Positives ({total_fps} item{'s' if total_fps != 1 else ''} — kept visible for full transparency)",
             border_style="blue",
             show_lines=True,
             expand=True,
         )
         table.add_column("#", width=3, style="dim")
-        table.add_column("Flagged Item", style="dim", width=22)
-        table.add_column("Location", style="cyan", width=22)
+        table.add_column("Flagged Item", style="dim", width=24)
+        table.add_column("Location", style="cyan", width=24)
         table.add_column("Why the AI believes this is safe", ratio=1)
 
-        for idx, item in enumerate(report.likely_false_positives, 1):
+        for idx, item in enumerate(displayed_fps, 1):
             f = item.finding
             loc = f"{f.file_path}:{f.line_start}" if f.file_path else "—"
             table.add_row(
                 str(idx),
-                f.title,
+                f"{f.title}\n[dim]{f.tool}[/dim]",
                 loc,
                 f"[italic]{item.exploitability_reasoning}[/italic]",
             )
 
         console.print(table)
 
-    # 5. Telemetry & Cost Footer
+        if omitted_fps_count > 0:
+            console.print(
+                f"[dim blue]🔍 ... and {omitted_fps_count} more likely false positive{'s' if omitted_fps_count != 1 else ''} suppressed. "
+                "See report export for complete audit log.[/dim blue]"
+            )
+
+    # 5. Final Sticky Verdict Card (at the bottom, visible above the user prompt)
+    console.print()
+    b_count = len(report.blockers)
+    w_count = len(report.warnings)
+    if report.verdict == Verdict.DONT_SHIP:
+        console.print(
+            Panel(
+                f"[bold white on red]  FINAL VERDICT: DON'T SHIP  [/bold white on red]  "
+                f"[bold red]{b_count} Blocker{'s' if b_count != 1 else ''}, {w_count} Warning{'s' if w_count != 1 else ''}[/bold red]\n\n"
+                f"[bold]Action Required:[/bold] Resolve {b_count} critical production blocker{'s' if b_count != 1 else ''} before shipping.\n"
+                f"[dim]Tip: Full code diffs & copy-paste replacement code are in -m AUDIT.md or -o report.json.[/dim]",
+                border_style="red",
+                title="Verdict Summary",
+            )
+        )
+    elif report.verdict == Verdict.FIX_FIRST:
+        console.print(
+            Panel(
+                f"[bold black on yellow]  FINAL VERDICT: FIX FIRST  [/bold black on yellow]  "
+                f"[bold yellow]0 Blockers, {w_count} Warning{'s' if w_count != 1 else ''}[/bold yellow]\n\n"
+                f"[bold]Action Recommended:[/bold] Review and resolve {w_count} warning{'s' if w_count != 1 else ''} before deploying to production.\n"
+                f"[dim]Tip: Advisory details and fix recommendations are in -m AUDIT.md or -o report.json.[/dim]",
+                border_style="yellow",
+                title="Verdict Summary",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "[bold white on green]  FINAL VERDICT: SAFE TO SHIP  [/bold white on green]  "
+                "[bold green]0 Blockers, 0 Warnings[/bold green]\n\n"
+                "No production security blockers detected. Your application is safe to ship!",
+                border_style="green",
+                title="Verdict Summary",
+            )
+        )
+
+    # 6. Telemetry & Cost Footer
     telemetry_parts = [f"Scanned in {report.scan_duration_seconds:.2f}s"]
     if report.skipped_files_summary:
         telemetry_parts.append(f"Exclusions: {report.skipped_files_summary}")
@@ -260,7 +396,16 @@ def print_network_report(report: Any) -> None:
             f"[bold dim]Edge Ingress / CDN:[/bold dim] {report.waf_or_cdn} [dim](Informational)[/dim]"
         )
     if report.ssrf_risk_warning:
-        banner_text.append(f"\n[bold red]🚨 ALERT: {report.ssrf_risk_warning}[/bold red]")
+        if (
+            getattr(report, "authorization_status", None) == "AUTHORIZED_LOCAL"
+            and report.is_private_ip
+            and not getattr(report, "is_metadata_ip", False)
+        ):
+            banner_text.append(
+                f"\n[bold cyan]ℹ️ Scope: Authorized Local Development Target ({report.hostname})[/bold cyan]"
+            )
+        else:
+            banner_text.append(f"\n[bold red]🚨 ALERT: {report.ssrf_risk_warning}[/bold red]")
 
     console.print(
         Panel(

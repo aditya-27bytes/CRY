@@ -11,7 +11,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from cry.exclusions import ExclusionStats, GitIgnoreMatcher, should_skip_path
+from cry.exclusions import (
+    ExclusionStats,
+    GitIgnoreMatcher,
+    is_build_or_task_file,
+    is_documentation_file,
+    is_test_or_fixture_file,
+    should_skip_path,
+)
 from cry.models import Category, Finding, Severity
 from cry.scanners.base import BaseScanner
 
@@ -318,7 +325,11 @@ def _should_skip_file(
     return name_lower.endswith(("_test.py", ".spec.ts", ".test.ts", ".spec.js", ".test.js"))
 
 
-def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
+def scan_file(
+    file_path: Path,
+    base_dir: Path,
+    include_tests_and_docs: bool = False,
+) -> list[Finding]:
     """Scan a single file for leaked secrets."""
     findings: list[Finding] = []
     relative_path = str(file_path.relative_to(base_dir))
@@ -488,6 +499,23 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                     )
                 )
 
+    if not include_tests_and_docs:
+        is_doc = is_documentation_file(file_path)
+        is_test_or_build = is_test_or_fixture_file(file_path, base_dir) or is_build_or_task_file(
+            file_path
+        )
+        if is_doc:
+            for f in findings:
+                f.severity = Severity.LOW
+                if not f.title.startswith("[Doc/Example Credential]"):
+                    f.title = f"[Doc/Example Credential] {f.title}"
+                f.description = f"[Documentation Reference] {f.description}"
+        elif is_test_or_build:
+            for f in findings:
+                f.severity = Severity.LOW
+                if not f.title.startswith("[Test/Build Fixture]"):
+                    f.title = f"[Test/Build Fixture] {f.title}"
+
     return findings
 
 
@@ -506,6 +534,7 @@ def scan_directory(
     max_file_size_mb: int = 5,
     include_vendor: bool = False,
     stats: ExclusionStats | None = None,
+    include_tests_and_docs: bool = False,
 ) -> list[Finding]:
     """Scan an entire directory tree for leaked secrets.
 
@@ -514,6 +543,7 @@ def scan_directory(
         max_file_size_mb: Skip files larger than this.
         include_vendor: Whether to include vendor/minified/gitignored files.
         stats: Optional ExclusionStats instance to track skipped files.
+        include_tests_and_docs: Whether to scan test fixtures and docs at full severity.
 
     Returns:
         List of normalized Finding objects.
@@ -542,12 +572,22 @@ def scan_directory(
         suffix = file_path.suffix.lower()
         if suffix in SKIP_EXTENSIONS:
             continue
-        name_lower = file_path.name.lower()
-        if name_lower.startswith("test_") and name_lower.endswith(".py"):
-            continue
-        if name_lower.endswith(("_test.py", ".spec.ts", ".test.ts", ".spec.js", ".test.js")):
-            continue
-        findings.extend(scan_file(file_path, target_dir))
+        if not include_tests_and_docs:
+            if is_documentation_file(file_path):
+                if stats:
+                    stats.record_skip(file_path, "docs")
+                continue
+            if is_test_or_fixture_file(file_path, target_dir):
+                if stats:
+                    stats.record_skip(file_path, "test_or_fixture")
+                continue
+            if is_build_or_task_file(file_path):
+                if stats:
+                    stats.record_skip(file_path, "build_config")
+                continue
+        findings.extend(
+            scan_file(file_path, target_dir, include_tests_and_docs=include_tests_and_docs)
+        )
 
     return findings
 
@@ -566,23 +606,38 @@ class SecretsScanner(BaseScanner):
     def is_available(self) -> bool:
         return True
 
-    def scan_file(self, file_path: Path, base_dir: Path) -> list[Finding]:
+    def scan_file(
+        self,
+        file_path: Path,
+        base_dir: Path,
+        include_tests_and_docs: bool = False,
+    ) -> list[Finding]:
         """Scan a single file directly."""
-        return scan_file(file_path, base_dir)
+        return scan_file(
+            file_path,
+            base_dir,
+            include_tests_and_docs=include_tests_and_docs,
+        )
 
     async def scan(
         self,
         target: Path | str,
         include_vendor: bool = False,
         stats: ExclusionStats | None = None,
+        include_tests_and_docs: bool = False,
     ) -> list[Finding]:
         target_path = Path(target)
         if target_path.is_file():
-            return scan_file(target_path, target_path.parent)
+            return scan_file(
+                target_path,
+                target_path.parent,
+                include_tests_and_docs=include_tests_and_docs,
+            )
         if target_path.is_dir():
             return scan_directory(
                 target_path,
                 include_vendor=include_vendor,
                 stats=stats,
+                include_tests_and_docs=include_tests_and_docs,
             )
         return []

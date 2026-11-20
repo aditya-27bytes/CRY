@@ -3,19 +3,20 @@
 > **"Know if you're safe to ship."**  
 > An open-source application and network security testing & triage platform for indie developers, solo founders, and fast-moving teams. CRY combines multi-engine static scanning, AST taint dataflow tracking, zero-dependency declarative rules, BYOM AI model benchmarking, and automated project network footprint discovery to deliver plain-English verdicts (`SHIP`, `FIX_FIRST`, `DONT_SHIP`) with exact copy-paste replacement code diffs.
 
-[![Release](https://img.shields.io/badge/release-v0.4.0-blueviolet.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/release-v0.4.1-blueviolet.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-101%20passed-brightgreen.svg)]()
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Type Checked](https://img.shields.io/badge/types-mypy-blue.svg)](http://mypy-lang.org/)
 
 > [!NOTE]
-> ### 🚀 Release v0.4.0 Highlights
-> * **🌐 Active & Passive Network Observability (`cry net`)**: Zero-packet passive footprint discovery, target ownership authorization gate, DNS rebinding protection, public database exposure alerts, and service offline detection.
-> * **🛡️ Multi-Model Failover & Privacy Guard**: Opt-in model failover (`CRY_FAILOVER=on`) with privacy boundaries preventing local code from failing over to remote cloud APIs.
-> * **🐧 Host & Linux System Health Monitor (`cry check`)**: Built-in system telemetry (CPU, RAM, disk, uptime, load averages, processes, network checks) with automated timestamped reports (`cry check --report`) and standalone Ubuntu Linux script (`scripts/system_health.sh`).
-> * **⚡ Modern Web & AI Security Rules**: Precision detection for SSTI, Prisma raw queries, JWT bypasses, CORS reflection, Vue XSS, tainted prompt injection (`CWE-1427`), and excessive agency (`CWE-1426`).
+> ### 🚀 Release v0.4.1 Highlights
+> * **🎯 Accuracy & Noise Reduction**: Filtered false positive credentials in documentation and test/build artifacts; added `--include-tests-and-docs`; fixed `.gitignore` exclusions accounting.
+> * **🖥️ Terminal UI/UX Overhaul**: High-density warning table (2–3 lines per row), automated category aggregation for > 10 warnings, blocker separation, and actionable sticky bottom verdict card (`SHIP` / `FIX_FIRST` / `DONT_SHIP`).
+> * **🔍 Full Display Option**: Added `--all` (`-a`) flag to `cry scan` and `cry full` to disable truncation whenever deep inspection is required.
+> * **🧬 Enhanced AST Taint Tracking**: Intra-file taint propagation across string concatenation, f-strings, format strings, dictionary lookups, list indexes, and allowlist guards.
+> * **⚡ NoSQL & SSRF Detection**: Flagging unvalidated MongoDB `$where` and operator injection (`CWE-943`) and dynamic HTTP clients (`CWE-918`).
+> * **📊 Authentic Real-App Benchmarks**: Added OWASP NodeGoat real-app benchmark harness (`cry eval --real-apps`) with pinned commit ground truth.
 >
 > See full details in [CHANGELOG.md](CHANGELOG.md).
 
@@ -46,8 +47,8 @@ CRY bridges this gap:
    - Fast built-in rule validation and testing (`cry rules test`).
 
 4. **Bring Your Own Model (BYOM) & AI Benchmarking**:
-   - Test, benchmark, and compare AI models (Groq, Ollama, vLLM, OpenAI, Hugging Face) side-by-side on 13 ground-truth security evaluation cases.
-   - Automated recommendation engine mathematically identifies the optimal model balancing 0 False Negatives, accuracy (F1), latency, and token cost.
+   - Benchmark candidate AI models (Groq, Ollama, vLLM, OpenAI, Hugging Face) using synthetic regression test cases or real applications (`cry eval`).
+   - Side-by-side multi-model comparison (`cry eval --compare model1,model2`) evaluates recall, precision, latency, and token cost across models.
 
 5. **Passive Project Footprint & Authorized Network Scanning (`cry net`)**:
    - **Passive Footprint (Default)**: Running `cry net` or `cry net --footprint .` discovers every declared URL, host, and IP in your codebase without dispatching any network packets. Normalizes integer dword, hex, octal, and IPv6-mapped IP formats to catch obfuscated SSRF attempts.
@@ -161,7 +162,7 @@ Every command in CRY works as a **seamless, single-line command** with intellige
 ```bash
 cry
 ```
-Features an interactive terminal menu to scan code, run health checks, execute benchmarks, configure LLMs, and inspect rules.
+Features an interactive terminal menu to scan code, run configuration checks, execute benchmarks, configure LLMs, and inspect rules.
 
 ### 2. Full Project Audit (All 5 Scanner Engines)
 Scans the entire project end-to-end across **Secrets**, **SAST**, **Supply-Chain Dependencies (SCA)**, **Configuration & Git Hygiene**, and **Network & SSRF Security**:
@@ -174,6 +175,9 @@ cry scan full
 
 # Run 100% offline without LLM:
 cry full --no-ai
+
+# Display all findings in the terminal without truncation:
+cry full --all
 ```
 
 ### 3. Network Security & IP Host Intelligence
@@ -213,6 +217,14 @@ cry scan ./src/routes/auth.py
 # Include third-party vendor directories, minified bundles, and lockfiles:
 cry scan --include-vendor
 cry full --include-vendor
+
+# Include test fixtures, build configs (e.g. Gruntfile), and documentation at full blocker severity:
+cry scan --include-tests-and-docs
+cry full --include-tests-and-docs
+
+# Display all findings in the terminal without compacting or truncation:
+cry scan --all
+cry full --all
 ```
 
 ### 5. Scan a Public Git Repository
@@ -270,45 +282,45 @@ Configure or switch your LLM provider (Groq, Ollama, Custom API) at any time:
 cry configure
 ```
 
-### 11. 🐧 Host & Linux System Health Monitor
-Inspect real-time system metrics, resource utilization, and proactive health alerts:
+### 11. Configuration & Readiness Check
+Inspect scanner readiness, provider reachability, model availability, and API key presence:
 ```bash
-# View scanner readiness and live host telemetry
+# Validate scanners, provider reachability, and model availability
 cry check
-
-# Generate a timestamped system health report in reports/
-cry check --report
 ```
-Or run the standalone Ubuntu Linux Bash monitor:
-```bash
-bash scripts/system_health.sh
-```
-Monitors: Hostname, active user, date/time, system uptime, load averages, CPU cores & load %, RAM & disk capacity %, process count, network connectivity, and threshold alerts.
 
 ---
 
-## 📊 Ground-Truth Evaluation Suite
+## 📊 Benchmark Evaluation Suites
 
-CRY includes a ground-truth benchmark suite of 13 paired vulnerability & safe-trap test cases scored across the OWASP Top 10:
+CRY includes two benchmark evaluation suites:
 
+### 1. Real-App Benchmark (OWASP NodeGoat)
+Runs an offline audit against the pinned OWASP NodeGoat benchmark commit (`c5cb68a7084e4ae7dcc60e6a98768720a81841e8`):
 ```bash
-# Run baseline evaluation
+# Run real-app benchmark against pinned NodeGoat commit
+cry eval --real-apps
+```
+Confirmed ground truth from local benchmark run:
+* **Known Blockers Found**: `7 / 7`
+* **Known Warnings Found**: `4 / 4`
+* **Known Bugs Missed**: `0`
+* **Noisy Blockers**: `0`
+
+### 2. Synthetic Regression Suite
+A 13-sample regression suite (`evals/results/v0.4.json`) covering standard vulnerability patterns and safe traps:
+```bash
+# Run regression suite with heuristic fallback
 cry eval --no-ai
 ```
-
-Current baseline metrics:
-* **Precision**: `100.00%` (0 noisy false alarms on safe traps)
-* **Recall (Sensitivity)**: `100.00%` (0 missed vulnerabilities)
-* **F1 Score**: `100.00%`
-* **Actionable Patch Rate**: `100.00%` (syntax-valid replacement code diff provided for all blockers)
-* **Inference Latency**: `0.00s` (offline heuristic) / `~3.8s` (Groq Llama 3.3 70B)
+See [BENCHMARK.md](BENCHMARK.md) for full execution logs, methodology, and version comparisons.
 
 ---
 
 ## 🧪 Running Automated Tests
 
 ```bash
-# Run full pytest test suite (94 passing unit tests)
+# Run full pytest test suite (126 passing unit tests)
 pytest -v
 
 # Run linter and type checker
@@ -319,18 +331,34 @@ mypy cry
 
 ---
 
-## 🛡️ Known Limitations & Design Constraints
+## 🛡️ Known Limitations & Security Model
 
-1. **Host Platform OpenSSL Security Level (`SECLEVEL`)**:
-   - Detection of legacy TLS 1.0 and TLS 1.1 protocol support via `--deep` depends on the host system's OpenSSL configuration. If the client platform enforces OpenSSL `SECLEVEL >= 2` (standard on modern Linux distributions and modern OpenSSL builds), the local client runtime prohibits initiating legacy handshakes.
-2. **Prompt Injection & LLM Defenses (`CWE-1427`)**:
-   - CRY flags dynamic request input interpolated into prompt templates. While structural role separation (system vs. user messages) and delimiters significantly reduce injection risk, no prompt architecture mathematically eliminates prompt injection. AI output must always be treated as untrusted.
-3. **Network Probing Observability Assurance**:
-   - Active network audits report observed technical indicators (open ports, header configurations, certificate attributes) at scan time only. CRY explicitly never certifies a host or web application as "secure" or free of vulnerabilities.
-4. **Privacy Guard Boundary**:
-   - When the primary LLM is configured to a local endpoint (`localhost`, `127.0.0.1`, `ollama`), CRY's Privacy Guard strictly blocks failing over to cloud APIs (e.g. OpenRouter). This prevents inadvertent transmission of confidential code to external servers.
-5. **Static Analysis Scope**:
-   - SAST taint analysis covers Python, JavaScript, and TypeScript dataflows. Highly obfuscated runtime reflection or dynamic code loading (`importlib.import_module(dynamic)`) may require human code audit.
+### 1. What Is NOT Detected
+Based on static analysis constraints and confirmed during the OWASP NodeGoat real-app benchmark:
+* **Inter-file & Inter-procedural Taint Flow**: Taint dataflow tracking operates within individual files. Tainted values passed across module imports, callbacks across distant files, or global event buses are not tracked.
+* **Second-Order Vulnerabilities**: Untrusted input stored in a database, cache, or filesystem and retrieved in a separate request cycle is not traced.
+* **Template-Based XSS in Custom Engines**: Template injection or DOM XSS where output is rendered through custom template filters outside standard DOM insertion sinks.
+* **Business Logic & Access Control Flaws**: Broken Object Level Authorization (IDORs where entity ownership is not validated), workflow bypasses, and privilege escalation logic.
+* **Session Lifecycle & Server CSRF State**: Server-side session expiration policies, token revocation state machines, and cookie security flags handled by external reverse proxies.
+* **Runtime-Only Vulnerabilities**: Race conditions, thread-safety bugs, memory leaks, and timing side-channels that require active program execution to detect.
+
+### 2. Languages Actually Supported
+* **First-Class AST Taint Tracking & Syntax Analysis**: **Python** (`.py`), **JavaScript** (`.js`, `.jsx`, `.mjs`, `.cjs`), and **TypeScript** (`.ts`, `.tsx`, `.vue`).
+* **Pattern & Manifest Auditing**: **JSON**, **YAML**, **TOML**, **Dockerfile**, `package.json`, `requirements.txt`.
+* **Plaintext Secret Scanning**: All UTF-8 text files across the repository (excluding binary files, vendor directories, and minified bundles).
+
+### 3. Active Network Scanning Authorization Gate
+* **Mandatory Pre-flight Proof of Control**: Active probing (`cry net TARGET`) strictly requires verified proof of target ownership before probing (DNS TXT verification token `cry-verify-...` or HTTP `/.well-known/cry-challenge.txt`).
+* **Local Network Safety**: Probing loopback (`127.0.0.1`, `localhost`) or private RFC-1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) requires explicit `--allow-local`.
+* **Permanent Cloud Metadata Protection**: Cloud metadata IP addresses (`169.254.169.254`, `fd00:ec2::254`) are permanently blocked from active probing under all circumstances.
+* **Observability Assurance**: CRY reports technical observations at scan time only (open ports, TLS attributes, HTTP headers) and never certifies a host as "secure".
+
+### 4. Data Privacy & Egress Disclosure (What Leaves Your Machine)
+* **Offline Mode (`cry scan --no-ai`)**: **Sends nothing.** 0 bytes and zero network packets leave your machine. All scanning and heuristic triage are 100% local.
+* **Hosted AI Triage (`--ai`)**: When AI triage is configured and enabled with a cloud provider (e.g., Groq, OpenRouter), CRY transmits code snippets and file context of flagged potential vulnerabilities to the provider's API endpoint (`CRY_LLM_BASE_URL`). Never configure a public cloud API key if your repository policy forbids sending source code to third-party model providers.
+* **Local Inference (Ollama / vLLM)**: When using a local inference endpoint (`localhost` / `127.0.0.1`), model inference remains strictly local on your machine.
+* **Multi-Model Failover Boundaries**: Model failover (`CRY_FAILOVER=on`) only activates when explicitly enabled in `.env`, and strictly operates cloud-to-cloud. If your primary LLM is configured as a local endpoint, CRY's Privacy Guard permanently enforces isolation and will **never fail over from a local endpoint to a cloud endpoint**.
+* **DNS Ownership Verification**: Running `cry net TARGET --authorize` sends DNS-over-HTTPS (DoH) queries to **Cloudflare's public DNS service** (`https://cloudflare-dns.com/dns-query`) containing `name={hostname}&type=TXT`. No source code, project files, or credentials are ever sent to Cloudflare; only the target hostname being authorized is queried.
 
 ---
 

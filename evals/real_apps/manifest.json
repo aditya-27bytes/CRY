@@ -1,0 +1,92 @@
+{
+  "benchmark_suite": "real_apps",
+  "version": "0.4.1",
+  "description": "Ground-truth real-application security benchmark targets pinned to immutable commit hashes.",
+  "targets": [
+    {
+      "name": "OWASP NodeGoat",
+      "repo_url": "https://github.com/OWASP/NodeGoat.git",
+      "pinned_commit": "c5cb68a7084e4ae7dcc60e6a98768720a81841e8",
+      "scan_command": "cry scan . --no-ai",
+      "expected_totals": {
+        "blockers": 7,
+        "warnings": 4
+      },
+      "expected_blocker_files": [
+        "artifacts/cert/server.key",
+        "app/data/allocations-dao.js",
+        "app/routes/contributions.js",
+        "app/routes/research.js"
+      ],
+      "expected_warning_files": [
+        "app/views/tutorial/a1.html",
+        "Gruntfile.js",
+        "test/e2e/support/commands.js",
+        "app/routes/index.js"
+      ],
+      "expected_clean_files": [
+        "README.md",
+        "app/routes/allocations.js",
+        "app/routes/profile.js",
+        "app/routes/user.js",
+        "server.js"
+      ],
+      "finding_checks": [
+        {
+          "file_path": "artifacts/cert/server.key",
+          "status": "BLOCKER",
+          "cwe_id": "CWE-321",
+          "rule_name": "Private Key (RSA/EC/DSA/SSH)",
+          "min_count": 1
+        },
+        {
+          "file_path": "app/data/allocations-dao.js",
+          "status": "BLOCKER",
+          "cwe_id": "CWE-943",
+          "rule_name": "NoSQL Injection via $where Clause",
+          "min_count": 1
+        },
+        {
+          "file_path": "app/routes/contributions.js",
+          "status": "BLOCKER",
+          "cwe_id": "CWE-95",
+          "rule_name": "Use of eval() or exec() on Dynamic Input",
+          "min_count": 3
+        },
+        {
+          "file_path": "app/routes/research.js",
+          "status": "BLOCKER",
+          "cwe_id": "CWE-918",
+          "rule_name": "Server-Side Request Forgery (SSRF) via Dynamic HTTP Client",
+          "min_count": 1
+        },
+        {
+          "file_path": "Gruntfile.js",
+          "status": "WARNING",
+          "cwe_id": "CWE-95",
+          "rule_name": "[Test/Build Fixture] Use of eval() or exec() on Dynamic Input",
+          "min_count": 1
+        },
+        {
+          "file_path": "test/e2e/support/commands.js",
+          "status": "WARNING",
+          "cwe_id": "CWE-95",
+          "rule_name": "[Test/Build Fixture] Use of eval() or exec() on Dynamic Input",
+          "min_count": 1
+        },
+        {
+          "file_path": "app/routes/index.js",
+          "status": "WARNING",
+          "cwe_id": "CWE-601",
+          "rule_name": "Potential Open Redirect",
+          "min_count": 1
+        },
+        {
+          "file_path": "README.md",
+          "status": "CLEAN",
+          "expected_findings": 0
+        }
+      ]
+    }
+  ]
+}

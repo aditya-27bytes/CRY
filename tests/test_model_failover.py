@@ -10,7 +10,12 @@ import pytest
 
 from cry.cli import _probe_provider_models
 from cry.models import Category, Finding, Severity, Verdict
-from cry.triage.client import LLMClient, LLMClientError, PrivacyGuardBlockedError
+from cry.triage.client import (
+    LLMClient,
+    LLMClientError,
+    PrivacyGuardBlockedError,
+    _clean_and_parse_json,
+)
 from cry.triage.engine import TriageEngine
 
 
@@ -70,7 +75,7 @@ def test_failover_to_secondary_on_429_when_enabled() -> None:
         secondary_api_key="sk-or-v1-mock",
         secondary_model="meta-llama/llama-3.3-70b-instruct",
     )
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
 
     with patch("asyncio.sleep", return_value=None):
         result, usage = _run_coroutine_sync(
@@ -118,7 +123,7 @@ def test_privacy_guard_blocks_cloud_failover_when_primary_is_local() -> None:
         secondary_api_key="sk-or-v1-cloud-key",
         secondary_model="meta-llama/llama-3.3-70b-instruct",
     )
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
 
     with (
         patch("asyncio.sleep", return_value=None),
@@ -164,7 +169,7 @@ def test_no_failover_when_cry_failover_is_disabled() -> None:
         secondary_api_key="sk-or-v1-cloud-key",
         secondary_model="meta-llama/llama-3.3-70b-instruct",
     )
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
 
     with patch("asyncio.sleep", return_value=None), pytest.raises(LLMClientError) as exc_info:
         _run_coroutine_sync(
@@ -200,7 +205,7 @@ def test_triage_engine_privacy_guard_graceful_offline_fallback() -> None:
         secondary_base_url="https://openrouter.ai/api/v1",
         secondary_api_key="sk-or-v1-secret",
     )
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
     engine = TriageEngine(client=client)
 
     findings = [
@@ -276,7 +281,7 @@ def test_verdict_report_telemetry_captures_failover_events() -> None:
         secondary_api_key="sk-or-v1-secondary",
         secondary_model="meta-llama/llama-3.3-70b-instruct",
     )
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
     engine = TriageEngine(client=client)
 
     findings = [
@@ -350,3 +355,119 @@ def test_probe_provider_models_mock(monkeypatch: pytest.MonkeyPatch) -> None:
     ok, models, msg = _probe_provider_models("http://unreachable.local/v1", None)
     assert ok is False
     assert "Unreachable" in msg
+
+
+def test_clean_and_parse_json_variants() -> None:
+    """Ensure _clean_and_parse_json recovers markdown-fenced, comma-trailed, and truncated JSON."""
+    # 1. Clean JSON
+    assert _clean_and_parse_json('{"key": "value"}') == {"key": "value"}
+
+    # 2. Markdown fenced JSON
+    markdown_json = '```json\n{"status": "ok", "items": [1, 2]}\n```'
+    assert _clean_and_parse_json(markdown_json) == {"status": "ok", "items": [1, 2]}
+
+    # 3. Trailing commas
+    trailing_comma_json = '{"items": [1, 2, ], "nested": {"a": "b", }, }'
+    assert _clean_and_parse_json(trailing_comma_json) == {"items": [1, 2], "nested": {"a": "b"}}
+
+    # 4. Truncated JSON with auto-closing brackets
+    truncated = '{"triage_results": [{"finding_id": "net-123", "status": "CONFIRMED_BLOCKER"}'
+    res = _clean_and_parse_json(truncated)
+    assert res["triage_results"][0]["finding_id"] == "net-123"
+
+
+def test_groq_json_validate_failed_salvage() -> None:
+    """When Groq returns HTTP 400 json_validate_failed, salvage triage_results from failed_generation."""
+    groq_400_payload = {
+        "error": {
+            "message": "Failed to generate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+            "type": "invalid_request_error",
+            "code": "json_validate_failed",
+            "failed_generation": '{"triage_results": [{"finding_id": "net-525a", "status": "LIKELY_FALSE_POSITIVE", "suggested_replacement_code": "docstring",}],}',
+        }
+    }
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        return httpx.Response(
+            status_code=400,
+            json=groq_400_payload,
+            request=httpx.Request("POST", url),
+        )
+
+    client = LLMClient(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="gsk_test_key",
+        model="llama-3.1-8b-instant",
+    )
+    client._send_request = mock_send  # type: ignore[method-assign]
+
+    result, usage = _run_coroutine_sync(
+        client.chat_completion_json(
+            system_prompt="system",
+            user_prompt="user",
+            findings_count=1,
+        )
+    )
+    assert "triage_results" in result
+    assert result["triage_results"][0]["finding_id"] == "net-525a"
+    assert result["triage_results"][0]["status"] == "LIKELY_FALSE_POSITIVE"
+
+
+def test_groq_json_validate_failed_retry_without_json_format() -> None:
+    """When Groq returns HTTP 400 with unrecoverable failed_generation, retry without response_format succeeds."""
+    calls: list[dict[str, Any]] = []
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        calls.append(payload)
+        if "response_format" in payload:
+            # First attempt with response_format fails with HTTP 400 unparseable failed_generation
+            return httpx.Response(
+                status_code=400,
+                json={
+                    "error": {
+                        "message": "Failed to generate JSON.",
+                        "code": "json_validate_failed",
+                        "failed_generation": "TOTAL_GARBAGE_NO_BRACES",
+                    }
+                },
+                request=httpx.Request("POST", url),
+            )
+        else:
+            # Second attempt without response_format succeeds
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '```json\n{"triage_results": [{"finding_id": "net-recovered", "status": "WARNING"}]}\n```'
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+                },
+                request=httpx.Request("POST", url),
+            )
+
+    client = LLMClient(
+        base_url="https://api.groq.com/openai/v1",
+        api_key="gsk_test_key",
+        model="llama-3.1-8b-instant",
+    )
+    client._send_request = mock_send  # type: ignore[method-assign]
+
+    result, usage = _run_coroutine_sync(
+        client.chat_completion_json(
+            system_prompt="system",
+            user_prompt="user",
+            findings_count=1,
+        )
+    )
+    assert len(calls) == 2
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+    assert result["triage_results"][0]["finding_id"] == "net-recovered"

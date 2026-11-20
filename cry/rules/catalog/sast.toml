@@ -79,10 +79,30 @@ category = "INJECTION"
 severity = "HIGH"
 cwe_id = "CWE-918"
 languages = [".py", ".ts", ".js"]
-patterns = ['requests\.(?:get|post)\s*\([^)]*req\.(?:args|query|params)', 'axios\.(?:get|post)\s*\([^)]*req\.(?:query|params|body)']
+patterns = [
+    'requests\.(?:get|post|put|delete)\s*\([^)]*req\.(?:args|query|params)',
+    'axios\.(?:get|post|put|delete)\s*\([^)]*req\.(?:query|params|body)',
+    'needle\.(?:get|post|put|delete)\s*\([^)]*req\.(?:query|params|body)',
+    'httpx\.(?:get|post|put|delete)\s*\([^)]*req\.(?:args|query|params)',
+]
 description = "Sending HTTP requests directly to an unvalidated user-supplied URL allows Server-Side Request Forgery (SSRF)."
 fix_hint = "Validate URLs against an explicit domain whitelist and resolve DNS to block private IP addresses."
 suggested_fix = "if not is_allowed_domain(target_url):\n    raise ValueError('Forbidden domain')\nrequests.get(target_url)"
+
+[[rules]]
+rule_id = "sast-nosql-injection-where"
+name = "NoSQL Injection via $where Clause"
+category = "INJECTION"
+severity = "CRITICAL"
+cwe_id = "CWE-943"
+languages = [".py", ".ts", ".js", ".tsx", ".jsx"]
+patterns = [
+    '''(?:\$where|["']\$where["'])\s*:\s*(?:(?:"[^"]*"|'[^']*')\s*\+|`[^`]*\$\{)''',
+    '''\$where\s*\(\s*(?:(?:"[^"]*"|'[^']*')\s*\+|`[^`]*\$\{)''',
+]
+description = "MongoDB/Mongoose $where clause evaluates arbitrary JavaScript. Concatenating or interpolating untrusted variables into $where allows attackers to manipulate query logic or execute arbitrary code."
+fix_hint = "Avoid $where clauses. Use standard MongoDB query operators ($eq, $gt, $in) with typed and validated values."
+suggested_fix = "allocations.find({ userId: parsedUserId, stocks: { $gt: Number(threshold) } })"
 
 # --- Modern Web & Framework SAST Rules ---
 

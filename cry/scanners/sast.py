@@ -17,7 +17,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from cry.exclusions import ExclusionStats, GitIgnoreMatcher, should_skip_path
+from cry.exclusions import (
+    ExclusionStats,
+    GitIgnoreMatcher,
+    is_build_or_task_file,
+    is_documentation_file,
+    is_test_or_fixture_file,
+    should_skip_path,
+)
 from cry.models import Category, Finding, Severity
 from cry.scanners.base import BaseScanner
 from cry.scanners.taint import analyze_taint_in_javascript, analyze_taint_in_python
@@ -131,7 +138,7 @@ SAST_RULES: list[SASTRule] = [
         description="User input is concatenated directly into an SQL query string. "
         "An attacker can inject arbitrary SQL to read, modify, or delete database contents.",
         pattern=re.compile(
-            r"""(?:execute|query|raw|run)\s*\(\s*(?:['"][^'"]*['"]\s*\+\s*|f['"][^'"]*\{|`[^`]*\$\{|['"][^'"]*['"]\s*%\s*)""",
+            r"""(?:execute|query|raw|run)\s*\(\s*(?:['"][^'"]*['"]\s*\+\s*|f['"][^'"]*\{|`[^`]*\$\{|['"][^'"]*['"]\s*%\s*|[a-zA-Z0-9_$.]+(?:\s*,\s*|\s*\)))""",
             re.IGNORECASE,
         ),
         category=Category.INJECTION,
@@ -215,6 +222,37 @@ SAST_RULES: list[SASTRule] = [
         languages={".py"},
         fix_hint="Use subprocess.run() with a list of arguments and shell=False.",
         suggested_fix='subprocess.run(["ping", "-c", "1", host], capture_output=True, text=True, check=True)',
+    ),
+    # ── Path Traversal ──
+    SASTRule(
+        rule_id="CRY-PATH-001",
+        title="Path Traversal via Untrusted File Operation",
+        description="User-controlled path is passed to a filesystem operation without validation. "
+        "An attacker can traverse directories (e.g., via '../') to access or modify arbitrary files.",
+        pattern=re.compile(
+            r"""\b(?:open|fs\.(?:readFile|readFileSync|createReadStream|writeFile|writeFileSync))\s*\(\s*([^,\)]+)""",
+            re.IGNORECASE,
+        ),
+        category=Category.INJECTION,
+        severity=Severity.CRITICAL,
+        cwe_id="CWE-22",
+        languages={".py", ".js", ".ts", ".jsx", ".tsx"},
+        fix_hint="Normalize the path and verify it stays inside the allowed directory via Path.resolve.",
+        suggested_fix='safe_path = (BASE_DIR / filename).resolve()\nif not safe_path.is_relative_to(BASE_DIR):\n    raise PermissionError("Access denied")',
+        language_fixes={
+            ".py": (
+                "Normalize the path and verify it stays inside the allowed directory via Path.resolve.",
+                'safe_path = (BASE_DIR / filename).resolve()\nif not safe_path.is_relative_to(BASE_DIR):\n    raise PermissionError("Access denied")',
+            ),
+            ".js": (
+                "Resolve and validate path against the base directory using path.resolve and path.relative.",
+                'const safePath = path.resolve(BASE_DIR, filename);\nif (!safePath.startsWith(BASE_DIR)) throw new Error("Invalid path");',
+            ),
+            ".ts": (
+                "Resolve and validate path against the base directory using path.resolve and path.relative.",
+                'const safePath = path.resolve(BASE_DIR, filename);\nif (!safePath.startsWith(BASE_DIR)) throw new Error("Invalid path");',
+            ),
+        },
     ),
     # ── Dangerous eval/exec ──
     SASTRule(
@@ -439,6 +477,98 @@ SAST_RULES: list[SASTRule] = [
             ),
         },
     ),
+    # ── NoSQL Injection ($where clause) ──
+    SASTRule(
+        rule_id="CRY-NOSQL-001",
+        title="NoSQL Injection via $where Clause",
+        description="MongoDB/Mongoose $where evaluation clause contains dynamic string concatenation or template interpolation. "
+        "An attacker can inject arbitrary JavaScript expressions to bypass authentication filters, exfiltrate data, or execute denial of service loops.",
+        pattern=re.compile(
+            r"""(?:(?:\$where|['"]\$where['"])\s*:\s*(?:f?(?:"[^"]*"|'[^']*')\s*\+|f['"][^'"]*\{|`[^`]*\$\{|[a-zA-Z0-9_$]+)|\$where\s*\(\s*(?:f?(?:"[^"]*"|'[^']*')\s*\+|f['"][^'"]*\{|`[^`]*\$\{|[a-zA-Z0-9_$]+))""",
+            re.IGNORECASE,
+        ),
+        category=Category.INJECTION,
+        severity=Severity.CRITICAL,
+        cwe_id="CWE-943",
+        languages={".py", ".js", ".ts", ".jsx", ".tsx"},
+        fix_hint="Avoid $where clauses. Use standard MongoDB query operators ($eq, $gt, $in) with typed and validated values.",
+        suggested_fix="allocations.find({ userId: parsedUserId, stocks: { $gt: Number(threshold) } })",
+        language_fixes={
+            ".py": (
+                "Avoid $where clauses. Use standard MongoDB query operators with typed and validated values.",
+                'db.allocations.find({"userId": int(user_id), "stocks": {"$gt": float(threshold)}})',
+            ),
+            ".js": (
+                "Avoid $where clauses. Use standard MongoDB query operators ($eq, $gt, $in) with typed and validated values.",
+                "allocations.find({ userId: parsedUserId, stocks: { $gt: Number(threshold) } });",
+            ),
+            ".ts": (
+                "Avoid $where clauses. Use standard MongoDB query operators ($eq, $gt, $in) with typed and validated values.",
+                "allocations.find({ userId: parsedUserId, stocks: { $gt: Number(threshold) } });",
+            ),
+        },
+    ),
+    # ── NoSQL Operator Injection ──
+    SASTRule(
+        rule_id="CRY-NOSQL-002",
+        title="NoSQL Operator Injection via Unsanitized Query",
+        description="Untrusted user input flows directly into a MongoDB/Mongoose query selector without type validation or sanitization. "
+        "Attackers can inject query operators (such as {'$gt': ''}) to bypass authentication or access restricted documents.",
+        pattern=re.compile(
+            r"""\.(?:find|findOne|update|updateOne|updateMany|delete|deleteOne|deleteMany|countDocuments)\s*\(\s*(?:req\.(?:body|query|params)|(?:params|query|filter|userInput))\b"""
+        ),
+        category=Category.INJECTION,
+        severity=Severity.HIGH,
+        cwe_id="CWE-943",
+        languages={".py", ".js", ".ts", ".jsx", ".tsx"},
+        fix_hint="Enforce strict types (e.g. parseInt(), String()) or validate query objects with a schema before passing to MongoDB.",
+        suggested_fix="allocations.find({ userId: parseInt(req.query.userId, 10) })",
+        language_fixes={
+            ".py": (
+                "Enforce strict types or validate query dict with a schema before querying MongoDB.",
+                'collection.find({"userId": int(request.args.get("userId"))})',
+            ),
+            ".js": (
+                "Enforce strict types (e.g. parseInt(), String()) or validate query objects with a schema.",
+                "allocations.find({ userId: parseInt(req.query.userId, 10) });",
+            ),
+            ".ts": (
+                "Enforce strict types (e.g. parseInt(), String()) or validate query objects with a schema.",
+                "allocations.find({ userId: parseInt(req.query.userId, 10) });",
+            ),
+        },
+    ),
+    # ── Server-Side Request Forgery (SSRF) ──
+    SASTRule(
+        rule_id="CRY-SSRF-001",
+        title="Server-Side Request Forgery (SSRF) via Dynamic HTTP Client",
+        description="An outbound HTTP request is issued to a user-controlled or dynamically constructed URL without allowlist validation. "
+        "An attacker can target internal microservices, loopback interfaces (localhost), or cloud metadata endpoints (169.254.169.254).",
+        pattern=re.compile(
+            r"""\b(?:needle\.(?:get|post|put|delete|request)|needle|axios\.(?:get|post|put|delete|request)|axios|fetch|requests\.(?:get|post|put|delete|request)|httpx\.(?:get|post|put|delete|request|Client))\s*\(\s*([^,\)]+)""",
+            re.IGNORECASE,
+        ),
+        category=Category.INJECTION,
+        severity=Severity.CRITICAL,
+        cwe_id="CWE-918",
+        languages={".py", ".js", ".ts", ".jsx", ".tsx"},
+        fix_hint="Validate destination URLs against an allowlist of trusted domains and resolve DNS to block private/internal IP addresses.",
+        suggested_fix="if (ALLOWED_DOMAINS.includes(targetUrl)) {\n    await needle.get(targetUrl, callback);\n}",
+        language_fixes={
+            ".py": (
+                "Validate destination URLs against an allowlist of trusted domains and resolve DNS to block private IP addresses.",
+                "if target_url in ALLOWED_DOMAINS:\n    response = requests.get(target_url, timeout=5)",
+            ),
+            ".js": (
+                "Validate destination URLs against an allowlist of trusted domains and resolve DNS to block private IP addresses.",
+                "if (ALLOWED_DOMAINS.includes(targetUrl)) {\n    needle.get(targetUrl, callback);\n}",
+            ),
+            ".ts": (
+                "Validate destination URLs against an allowlist of trusted domains and resolve DNS to block private IP addresses.",
+                "if (ALLOWED_DOMAINS.includes(targetUrl)) {\n    await axios.get(targetUrl);\n}",
+            ),
+        },
+    ),
 ]
 
 
@@ -520,7 +650,11 @@ def _get_catalog_sast_rules(base_dir: Path, extension: str) -> list[Any]:
     return _CACHED_CATALOG_SAST_RULES[extension]
 
 
-def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
+def scan_file(
+    file_path: Path,
+    base_dir: Path,
+    include_tests_and_docs: bool = False,
+) -> list[Finding]:
     """Scan a single source file for dangerous code patterns."""
     findings: list[Finding] = []
     relative_path = str(file_path.relative_to(base_dir))
@@ -590,6 +724,53 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                 elif extension in {".ts", ".tsx", ".js", ".jsx"}:
                     taint = analyze_taint_in_javascript(content, line_num)
 
+                if rule.rule_id == "CRY-SQLI-001":
+                    is_direct_syntax = any(s in line for s in ("+", 'f"', "f'", "`", "%"))
+                    if not is_direct_syntax and (taint is None or not taint.is_tainted):
+                        continue
+
+                if rule.rule_id == "CRY-PATH-001" and (taint is None or not taint.is_tainted):
+                    continue
+
+                if rule.rule_id == "CRY-NOSQL-001":
+                    is_direct_concat = any(s in line for s in ("+", "${", 'f"', "f'"))
+                    if not is_direct_concat and (taint is not None and not taint.is_tainted):
+                        continue
+
+                if rule.rule_id == "CRY-NOSQL-002" and (taint is not None and not taint.is_tainted):
+                    continue
+
+                if rule.rule_id == "CRY-SSRF-001":
+                    m_call = rule.pattern.search(line)
+                    if m_call:
+                        arg_val = m_call.group(1).strip()
+                        # Pure string constant literals without variable interpolation/concat are safe
+                        is_static_literal = (
+                            arg_val.startswith(('"', "'"))
+                            and arg_val.endswith(('"', "'"))
+                            and not any(s in arg_val for s in ("+", "${", "%"))
+                        )
+                        if is_static_literal:
+                            continue
+                    is_direct_source = any(
+                        src in line
+                        for src in (
+                            "req.query",
+                            "req.params",
+                            "req.body",
+                            "request.args",
+                            "request.GET",
+                            "request.POST",
+                            "request.form",
+                            "request.values",
+                        )
+                    )
+                    if not is_direct_source and (taint is None or not taint.is_tainted):
+                        continue
+
+                if taint and not taint.is_tainted and taint.confidence < 0.3:
+                    continue
+
                 confidence = 1.0
                 t_src = None
                 t_sink = None
@@ -656,6 +837,17 @@ def scan_file(file_path: Path, base_dir: Path) -> list[Finding]:
                     )
                     break
 
+    if not include_tests_and_docs:
+        is_test_or_build = is_test_or_fixture_file(file_path, base_dir) or is_build_or_task_file(
+            file_path
+        )
+        if is_test_or_build:
+            for f in findings:
+                f.severity = Severity.LOW
+                if not f.title.startswith("[Test/Build Fixture]"):
+                    f.title = f"[Test/Build Fixture] {f.title}"
+                f.description = f"[Test/Build Fixture] {f.description}"
+
     return findings
 
 
@@ -664,6 +856,7 @@ def scan_directory(
     max_file_size_mb: int = 5,
     include_vendor: bool = False,
     stats: ExclusionStats | None = None,
+    include_tests_and_docs: bool = False,
 ) -> list[Finding]:
     """Scan an entire directory tree for dangerous code patterns.
 
@@ -672,6 +865,7 @@ def scan_directory(
         max_file_size_mb: Skip files larger than this.
         include_vendor: Whether to include vendor/minified/gitignored files.
         stats: Optional ExclusionStats instance to track skipped files.
+        include_tests_and_docs: Whether to scan test fixtures and build scripts at full severity.
 
     Returns:
         List of normalized Finding objects.
@@ -699,12 +893,11 @@ def scan_directory(
             continue
         if file_path.suffix.lower() not in SCANNABLE_EXTENSIONS:
             continue
-        name_lower = file_path.name.lower()
-        if name_lower.startswith("test_") and name_lower.endswith(".py"):
+        if not include_tests_and_docs and is_documentation_file(file_path):
             continue
-        if name_lower.endswith(("_test.py", ".spec.ts", ".test.ts", ".spec.js", ".test.js")):
-            continue
-        findings.extend(scan_file(file_path, target_dir))
+        findings.extend(
+            scan_file(file_path, target_dir, include_tests_and_docs=include_tests_and_docs)
+        )
 
     return findings
 
@@ -723,23 +916,38 @@ class SASTScanner(BaseScanner):
     def is_available(self) -> bool:
         return True
 
-    def scan_file(self, file_path: Path, base_dir: Path) -> list[Finding]:
+    def scan_file(
+        self,
+        file_path: Path,
+        base_dir: Path,
+        include_tests_and_docs: bool = False,
+    ) -> list[Finding]:
         """Scan a single file directly."""
-        return scan_file(file_path, base_dir)
+        return scan_file(
+            file_path,
+            base_dir,
+            include_tests_and_docs=include_tests_and_docs,
+        )
 
     async def scan(
         self,
         target: Path | str,
         include_vendor: bool = False,
         stats: ExclusionStats | None = None,
+        include_tests_and_docs: bool = False,
     ) -> list[Finding]:
         target_path = Path(target)
         if target_path.is_file():
-            return scan_file(target_path, target_path.parent)
+            return scan_file(
+                target_path,
+                target_path.parent,
+                include_tests_and_docs=include_tests_and_docs,
+            )
         if target_path.is_dir():
             return scan_directory(
                 target_path,
                 include_vendor=include_vendor,
                 stats=stats,
+                include_tests_and_docs=include_tests_and_docs,
             )
         return []

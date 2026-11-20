@@ -14,6 +14,7 @@ from cry.models import (
     VerdictReport,
 )
 from cry.reporters.json_reporter import export_json_report
+from cry.reporters.terminal import print_verdict_report
 from cry.triage.client import LLMClient
 from cry.triage.engine import TriageEngine, extract_code_context
 
@@ -246,7 +247,7 @@ def test_llm_client_dynamic_model_failover_on_429() -> None:
                 request=httpx.Request("POST", url),
             )
 
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
     data, usage = _run_coroutine_sync(
         client.chat_completion_json(system_prompt="sys", user_prompt="user")
     )
@@ -289,7 +290,7 @@ def test_llm_client_dynamic_model_failover_on_404() -> None:
             request=httpx.Request("POST", url),
         )
 
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
     data, usage = _run_coroutine_sync(
         client.chat_completion_json(system_prompt="sys", user_prompt="user")
     )
@@ -338,7 +339,7 @@ def test_llm_client_retry_round_after_all_models_throttled() -> None:
             request=httpx.Request("POST", url),
         )
 
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
     with patch("asyncio.sleep", return_value=None):
         data, usage = _run_coroutine_sync(
             client.chat_completion_json(system_prompt="sys", user_prompt="user")
@@ -393,7 +394,7 @@ def test_smart_hybrid_routing_partitions_secrets_and_test_mocks() -> None:
             request=httpx.Request("POST", url),
         )
 
-    client._send_request = mock_send  # type: ignore[assignment]
+    client._send_request = mock_send  # type: ignore[method-assign]
     engine = TriageEngine(client=client)
 
     findings = [
@@ -492,3 +493,151 @@ def test_test_fixtures_only_yield_warning_not_dont_ship() -> None:
     assert len(ai_report.warnings) == 2
     assert ai_report.verdict == Verdict.FIX_FIRST
     assert "TEST/MOCK WARNINGS" in ai_report.summary
+
+
+def test_print_verdict_report_compact_warnings_overflow(capsys: Any) -> None:
+    """When warnings exceed max_compact_warnings, output must cap and summarize remaining."""
+    warnings: list[TriagedFinding] = []
+    for i in range(25):
+        f = Finding(
+            id=f"w-{i}",
+            tool="cry-sast",
+            title="Insecure Randomness" if i % 2 == 0 else "Debug Mode",
+            description=f"Warning detail {i}",
+            category=Category.MISCONFIGURATION,
+            severity=Severity.MEDIUM,
+            file_path=f"tests/test_{i}.py",
+            line_start=10 + i,
+        )
+        warnings.append(
+            TriagedFinding(
+                finding=f,
+                status=TriageStatus.WARNING,
+                plain_english_explanation=f"Advisory explanation {i}",
+                exploitability_reasoning=f"Reasoning {i}",
+                fix_recommendation=f"Fix recommendation {i}",
+            )
+        )
+
+    report = VerdictReport(
+        verdict=Verdict.FIX_FIRST,
+        summary="Test summary",
+        target=".",
+        blockers=[],
+        warnings=warnings,
+        likely_false_positives=[],
+    )
+
+    print_verdict_report(report)
+    out = capsys.readouterr().out
+
+    # Top 10 shown, remaining 15 summarized
+    assert "Showing top 10 of 25" in out
+    assert "15 additional advisory warning" in out
+    assert "Insecure Randomness" in out
+    assert "VERDICT: FIX FIRST" in out
+    assert "0 Blockers, 25 Warnings" in out
+
+
+def test_print_verdict_report_all_findings_expands_all(capsys: Any) -> None:
+    """When all_findings is True, all warnings must be rendered without truncation."""
+    warnings: list[TriagedFinding] = []
+    for i in range(15):
+        f = Finding(
+            id=f"w-{i}",
+            tool="cry-sast",
+            title="Advisory Rule",
+            description=f"Warning detail {i}",
+            category=Category.MISCONFIGURATION,
+            severity=Severity.LOW,
+            file_path=f"tests/test_{i}.py",
+            line_start=10 + i,
+        )
+        warnings.append(
+            TriagedFinding(
+                finding=f,
+                status=TriageStatus.WARNING,
+                plain_english_explanation=f"Advisory explanation {i}",
+                exploitability_reasoning=f"Reasoning {i}",
+                fix_recommendation=f"Fix recommendation {i}",
+            )
+        )
+
+    report = VerdictReport(
+        verdict=Verdict.FIX_FIRST,
+        summary="Test summary",
+        target=".",
+        blockers=[],
+        warnings=warnings,
+        likely_false_positives=[],
+    )
+
+    print_verdict_report(report, all_findings=True)
+    out = capsys.readouterr().out
+
+    assert "Warnings & Advisories (15 items)" in out
+    assert "omitted from terminal view" not in out
+    assert "VERDICT: FIX FIRST" in out
+
+
+def test_print_verdict_report_blockers_capping_and_sticky_footer(capsys: Any) -> None:
+    """Blockers exceeding 5 must display top 5 detailed and remaining in compact table."""
+    blockers: list[TriagedFinding] = []
+    for i in range(12):
+        f = Finding(
+            id=f"b-{i}",
+            tool="cry-secrets",
+            title="AWS Access Key",
+            description=f"Secret leak {i}",
+            category=Category.SECRET_EXPOSURE,
+            severity=Severity.CRITICAL,
+            file_path=f"src/config_{i}.py",
+            line_start=5 + i,
+            code_snippet=f"AWS_KEY_{i} = 'AKIA12345'",
+        )
+        blockers.append(
+            TriagedFinding(
+                finding=f,
+                status=TriageStatus.CONFIRMED_BLOCKER,
+                plain_english_explanation=f"Exposed AWS Key {i}",
+                exploitability_reasoning=f"Critical threat vector {i}",
+                fix_recommendation="Use env var",
+                suggested_replacement_code=f"os.environ['AWS_KEY_{i}']",
+            )
+        )
+
+    report = VerdictReport(
+        verdict=Verdict.DONT_SHIP,
+        summary="Critical blockers found",
+        target=".",
+        blockers=blockers,
+        warnings=[],
+        likely_false_positives=[],
+    )
+
+    print_verdict_report(report)
+    out = capsys.readouterr().out
+
+    assert "Critical Blockers (12 issues)" in out
+    assert "Additional Critical Blockers (7 more)" in out
+    assert "VERDICT: DON'T SHIP" in out
+    assert "12 Blockers, 0 Warnings" in out
+
+
+def test_print_verdict_report_safe_to_ship(capsys: Any) -> None:
+    """Safe to ship reports must print clean verdict panel with zero blockers and warnings."""
+    report = VerdictReport(
+        verdict=Verdict.SHIP,
+        summary="No blockers found",
+        target=".",
+        blockers=[],
+        warnings=[],
+        likely_false_positives=[],
+    )
+
+    print_verdict_report(report)
+    out = capsys.readouterr().out
+
+    assert "SAFE TO SHIP" in out
+    assert "0 Blockers, 0 Warnings" in out
+    assert "Your application is safe to ship!" in out

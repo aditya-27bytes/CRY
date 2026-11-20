@@ -64,6 +64,144 @@ BUNDLED_EXACT_NAMES: set[str] = {
     "vendor-bundle.js",
 }
 
+# Documentation file detection
+DOC_EXTENSIONS: set[str] = {".md", ".markdown", ".rst", ".txt", ".adoc", ".asciidoc"}
+DOC_DIR_NAMES: set[str] = {"docs", "doc", "documentation", "guides", "manual"}
+DOC_EXACT_NAMES: set[str] = {
+    "readme",
+    "readme.md",
+    "readme.markdown",
+    "readme.txt",
+    "readme.rst",
+    "changelog",
+    "changelog.md",
+    "contributing",
+    "contributing.md",
+    "license",
+    "license.md",
+    "security",
+    "security.md",
+    "benchmark.md",
+}
+
+# Build and task runner config files
+BUILD_CONFIG_PATTERNS: tuple[str, ...] = (
+    "gruntfile",
+    "gulpfile",
+    "webpack",
+    "vite.config",
+    "rollup.config",
+    "esbuild",
+    "babel.config",
+    "karma.conf",
+    "jest.config",
+    "tsconfig",
+    "next.config",
+    "nuxt.config",
+    "postcss.config",
+    "tailwind.config",
+)
+
+# Test, mock, fixture directories and suffixes
+TEST_DIR_NAMES: set[str] = {
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "specs",
+    "fixtures",
+    "e2e",
+    "mock",
+    "mocks",
+    "test_fixtures",
+    "eval",
+    "evals",
+    "dataset",
+    "datasets",
+}
+TEST_FILE_PREFIXES: tuple[str, ...] = ("test_", "mock_", "spec_")
+TEST_FILE_SUFFIXES: tuple[str, ...] = (
+    "_test.py",
+    "_spec.rb",
+    "_test.go",
+    "_test.rs",
+    "tests.rs",
+    ".test.ts",
+    ".spec.ts",
+    ".test.js",
+    ".spec.js",
+    ".test.tsx",
+    ".spec.tsx",
+    ".test.jsx",
+    ".spec.jsx",
+    ".test.mjs",
+    ".test.cjs",
+    ".mock.ts",
+    ".mock.js",
+    "-test.js",
+    "-spec.js",
+)
+TEST_FILE_EXACT: set[str] = {
+    "test.py",
+    "test.js",
+    "test.ts",
+    "tests.py",
+    "tests.js",
+    "tests.ts",
+    "conftest.py",
+}
+
+
+def is_documentation_file(file_path: Path | str) -> bool:
+    """Return True if the file is documentation or a markdown/readme file."""
+    p = Path(file_path) if isinstance(file_path, str) else file_path
+    name_lower = p.name.lower()
+    stem_lower = p.stem.lower()
+    suffix = p.suffix.lower()
+
+    if name_lower in DOC_EXACT_NAMES or stem_lower in (
+        "readme",
+        "changelog",
+        "contributing",
+        "license",
+    ):
+        return True
+    if suffix in DOC_EXTENSIONS:
+        return True
+    parts = {part.lower() for part in p.parts}
+    return not parts.isdisjoint(DOC_DIR_NAMES)
+
+
+def is_build_or_task_file(file_path: Path | str) -> bool:
+    """Return True if the file is a build configuration or task runner script."""
+    p = Path(file_path) if isinstance(file_path, str) else file_path
+    name_lower = p.name.lower()
+    return any(pat in name_lower for pat in BUILD_CONFIG_PATTERNS)
+
+
+def is_test_or_fixture_file(file_path: Path | str, base_dir: Path | None = None) -> bool:
+    """Check if file lives under a test, mock, fixture directory or matches test naming."""
+    p = Path(file_path) if isinstance(file_path, str) else file_path
+    name_lower = p.name.lower()
+
+    if name_lower in TEST_FILE_EXACT:
+        return True
+    if name_lower.startswith(TEST_FILE_PREFIXES):
+        return True
+    if name_lower.endswith(TEST_FILE_SUFFIXES):
+        return True
+
+    if base_dir:
+        try:
+            rel = p.relative_to(base_dir)
+            parts = {part.lower() for part in rel.parts}
+        except ValueError:
+            parts = {part.lower() for part in p.parts}
+    else:
+        parts = {part.lower() for part in p.parts}
+
+    return not parts.isdisjoint(TEST_DIR_NAMES)
+
 
 def is_minified_or_bundled(file_path: Path, max_check_bytes: int = 65536) -> bool:
     """Detect whether a file is minified or bundled by filename or content heuristics."""
@@ -117,22 +255,21 @@ def is_minified_or_bundled(file_path: Path, max_check_bytes: int = 65536) -> boo
 
 
 class GitIgnoreMatcher:
-    """Lightweight .gitignore parser and pattern matcher."""
+    """Lightweight .gitignore and .cryignore parser and pattern matcher."""
 
     def __init__(self, root_dir: Path) -> None:
-        self.root_dir = root_dir
-        self.rules: list[tuple[bool, str, bool]] = []
+        self.root_dir = root_dir.resolve()
+        # Stores tuples of (is_negated, pattern, dir_only, anchored, base_dir)
+        self.rules: list[tuple[bool, str, bool, bool, Path]] = []
         self._load()
 
-    def _load(self) -> None:
-        gitignore_path = self.root_dir / ".gitignore"
-        if not gitignore_path.is_file():
-            return
+    def _parse_file(self, ignore_path: Path) -> None:
         try:
-            content = gitignore_path.read_text(encoding="utf-8", errors="ignore")
+            content = ignore_path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return
 
+        base_dir = ignore_path.parent
         for line in content.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -143,37 +280,64 @@ class GitIgnoreMatcher:
             dir_only = line.endswith("/")
             if dir_only:
                 line = line[:-1]
-            if line.startswith("/"):
+            anchored = line.startswith("/")
+            if anchored:
                 line = line[1:]
             if line:
-                self.rules.append((is_negated, line, dir_only))
+                self.rules.append((is_negated, line, dir_only, anchored, base_dir))
+
+    def _load(self) -> None:
+        # Check parent hierarchy up to git root or filesystem root to inherit repository ignore rules
+        curr = self.root_dir
+        chain = [curr]
+        while curr.parent != curr:
+            curr = curr.parent
+            chain.append(curr)
+            if (curr / ".git").exists():
+                break
+
+        # Load rules from top-most parent down to root_dir
+        for d in reversed(chain):
+            for name in (".gitignore", ".cryignore"):
+                ignore_file = d / name
+                if ignore_file.is_file():
+                    self._parse_file(ignore_file)
 
     def is_ignored(self, path: Path) -> bool:
         if not self.rules:
             return False
 
-        try:
-            rel_path = path.relative_to(self.root_dir)
-        except ValueError:
-            rel_path = path
-
-        rel_str = str(rel_path).replace("\\", "/")
-        parts = rel_path.parts
+        p_res = path.resolve()
         ignored = False
 
-        for is_negated, pattern, _dir_only in self.rules:
+        for is_negated, pattern, _dir_only, anchored, base_dir in self.rules:
+            try:
+                rel_path = p_res.relative_to(base_dir)
+            except ValueError:
+                continue
+
+            rel_str = str(rel_path).replace("\\", "/")
+            parts = rel_path.parts
+
             matched = False
-            # If pattern has no slash, match filename or any directory component
-            if "/" not in pattern:
-                if any(fnmatch.fnmatch(part, pattern) for part in parts):
-                    matched = True
-            else:
-                if (
+            if anchored:
+                matched = (
                     fnmatch.fnmatch(rel_str, pattern)
+                    or rel_str.startswith(f"{pattern}/")
+                    or fnmatch.fnmatch(rel_str, f"{pattern}/*")
+                    or fnmatch.fnmatch(rel_str, f"{pattern}/**")
+                )
+            elif "/" not in pattern:
+                matched = any(fnmatch.fnmatch(part, pattern) for part in parts)
+            else:
+                matched = (
+                    fnmatch.fnmatch(rel_str, pattern)
+                    or rel_str.startswith(f"{pattern}/")
                     or fnmatch.fnmatch(rel_str, f"*/{pattern}")
-                    or fnmatch.fnmatch(rel_str, f"**/{pattern}")
-                ):
-                    matched = True
+                    or fnmatch.fnmatch(rel_str, f"*/{pattern}/*")
+                    or fnmatch.fnmatch(rel_str, f"*/{pattern}/**")
+                    or fnmatch.fnmatch(rel_str, f"**/{pattern}/*")
+                )
 
             if matched:
                 ignored = not is_negated
@@ -274,6 +438,9 @@ class ExclusionStats:
             "build_artifact",
             "lockfile",
             "gitignore",
+            "docs",
+            "test_or_fixture",
+            "build_config",
             "oversized",
         ]:
             if counts.get(reason, 0) > 0:
@@ -286,6 +453,9 @@ class ExclusionStats:
                 "build_artifact",
                 "lockfile",
                 "gitignore",
+                "docs",
+                "test_or_fixture",
+                "build_config",
                 "oversized",
                 "cache_or_system",
             }:

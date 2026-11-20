@@ -37,6 +37,63 @@ class PrivacyGuardBlockedError(LLMClientError):
     pass
 
 
+def _clean_and_parse_json(content_str: str) -> dict[str, Any]:
+    """Extract and parse JSON from LLM response with resilient formatting cleanups."""
+    text = content_str.strip()
+
+    # Strip markdown code blocks if present (```json ... ``` or ``` ...)
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = text.strip()
+
+    # Fast path: try standard json.loads
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Clean trailing commas before closing braces/brackets (e.g. `",\n}"` or `",\n]"`)
+    cleaned_commas = re.sub(r",\s*([\]}])", r"\1", text)
+    try:
+        parsed = json.loads(cleaned_commas)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Extract JSON object between first { and last }
+    first_brace = cleaned_commas.find("{")
+    last_brace = cleaned_commas.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        snippet = cleaned_commas[first_brace : last_brace + 1]
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # If it was truncated or missing closing brackets/braces, attempt recovery
+    if first_brace != -1:
+        truncated = cleaned_commas[first_brace:]
+        open_brackets = truncated.count("[") - truncated.count("]")
+        open_braces = truncated.count("{") - truncated.count("}")
+        if open_brackets > 0 or open_braces > 0:
+            patched = truncated + ("]" * max(0, open_brackets)) + ("}" * max(0, open_braces))
+            patched = re.sub(r",\s*([\]}])", r"\1", patched)
+            try:
+                parsed = json.loads(patched)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+    raise json.JSONDecodeError("Could not extract valid JSON object from response", text, 0)
+
+
 class LLMClient:
     """Lightweight, resilient OpenAI-compatible chat completion client with dynamic model failover."""
 
@@ -115,6 +172,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
+        force_json_format: bool = True,
     ) -> tuple[dict[str, Any], TokenUsage]:
         """Execute a single JSON completion request against a specified provider endpoint."""
         headers: dict[str, str] = {
@@ -135,16 +193,45 @@ class LLMClient:
             ],
             "temperature": temperature,
             "max_tokens": 4096,
-            "response_format": {"type": "json_object"},
         }
+        if force_json_format:
+            payload["response_format"] = {"type": "json_object"}
 
         response = await self._send_request(url, headers=headers, payload=payload)
+
+        # Handle provider-level JSON validation rejection (e.g. Groq json_validate_failed HTTP 400)
+        if response.status_code == 400 and (
+            "json_validate_failed" in response.text or "Failed to generate JSON" in response.text
+        ):
+            # Attempt 1: Salvage generation from error payload
+            try:
+                err_data = response.json()
+                failed_gen = err_data.get("error", {}).get("failed_generation")
+                if failed_gen:
+                    salvaged = _clean_and_parse_json(failed_gen)
+                    if isinstance(salvaged, dict) and "triage_results" in salvaged:
+                        return salvaged, TokenUsage()
+            except Exception:
+                pass
+
+            # Attempt 2: Retry once without grammar constraint (force_json_format=False)
+            if force_json_format:
+                return await self._execute_completion(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    force_json_format=False,
+                )
+
         response.raise_for_status()
         data = response.json()
 
         try:
             content_str = data["choices"][0]["message"]["content"]
-            result_json = json.loads(content_str)
+            result_json = _clean_and_parse_json(content_str)
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise LLMClientError(f"Invalid JSON response from LLM at {url}: {e}") from e
 

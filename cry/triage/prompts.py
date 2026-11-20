@@ -23,6 +23,12 @@ CRITICAL TRIAGE PRINCIPLES:
    - "FIX_FIRST": Medium issues that create security debt or compliance risks (CORS wildcards, disabled CSRF, open redirects).
    - "SHIP": Code is safe, or only contains benign test fixtures with no production exposure.
 
+CRITICAL JSON FORMATTING RULES:
+- Output MUST be valid RFC 8259 JSON.
+- Never output trailing commas before '}' or ']'.
+- In code replacement strings, ensure all quotes and newlines are valid JSON escapes (use \\n for newlines, \\" for quotes).
+- Do not output markdown text outside the JSON object.
+
 You MUST respond strictly with valid JSON conforming to this schema:
 {
   "triage_results": [

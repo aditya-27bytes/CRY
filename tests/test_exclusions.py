@@ -17,6 +17,17 @@ VENDOR_APP_DIR = FIXTURES_DIR / "vendor_app"
 
 def test_default_exclusions_skip_vendor_minified_and_gitignored() -> None:
     """Default scan must produce zero findings from vendor, minified, and gitignored files."""
+    # Ensure ignored_script.js exists even on fresh checkouts where .gitignore might suppress tracking
+    ignored_file = VENDOR_APP_DIR / "ignored_script.js"
+    if not ignored_file.exists():
+        ignored_file.write_text(
+            "// Ignored script that should be skipped by gitignore matcher\n"
+            "function runEval(input) {\n"
+            "    eval(input);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
     stats = ExclusionStats()
     sast_findings = scan_sast_dir(
         VENDOR_APP_DIR,
@@ -92,7 +103,7 @@ def test_gitignore_matcher(tmp_path: Path) -> None:
     """GitIgnoreMatcher must accurately filter files matching .gitignore patterns."""
     gitignore = tmp_path / ".gitignore"
     gitignore.write_text(
-        "# Comments\n\nbuild/\n*.log\n/secret.env\n!important.log\n",
+        "# Comments\n\nbuild/\n*.log\n/secret.env\n!important.log\nsub/dir/\n",
         encoding="utf-8",
     )
 
@@ -102,6 +113,8 @@ def test_gitignore_matcher(tmp_path: Path) -> None:
     assert matcher.is_ignored(tmp_path / "secret.env") is True
     assert matcher.is_ignored(tmp_path / "src" / "index.js") is False
     assert matcher.is_ignored(tmp_path / "important.log") is False
+    assert matcher.is_ignored(tmp_path / "sub" / "dir" / "file.py") is True
+    assert matcher.is_ignored(tmp_path / "other" / "dir" / "file.py") is False
 
 
 def test_should_skip_path_categories(tmp_path: Path) -> None:
@@ -117,3 +130,52 @@ def test_should_skip_path_categories(tmp_path: Path) -> None:
     # With include_vendor=True, it should not skip
     dec_included = should_skip_path(vendor_file, tmp_path, include_vendor=True)
     assert dec_included.skip is False
+
+
+def test_gitignore_isolated_reproduction_in_temp_dir(tmp_path: Path) -> None:
+    """Reproduce and verify .gitignore skipping with isolated temp directory."""
+    # 1. Setup minimal directory structure:
+    #    - .gitignore (ignoring 'ignored_vuln.py' and 'ignored_dir/')
+    #    - ignored_vuln.py (contains real vulnerability: eval)
+    #    - ignored_dir/nested_vuln.py (vulnerability inside ignored folder)
+    #    - normal_safe.py (clean file)
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("ignored_vuln.py\nignored_dir/\n", encoding="utf-8")
+
+    ignored_file = tmp_path / "ignored_vuln.py"
+    ignored_file.write_text(
+        "import os\ndef run(user_cmd):\n    os.system(user_cmd)\n",
+        encoding="utf-8",
+    )
+
+    ignored_dir = tmp_path / "ignored_dir"
+    ignored_dir.mkdir()
+    nested_ignored_file = ignored_dir / "nested_vuln.py"
+    nested_ignored_file.write_text(
+        "def bad(x):\n    eval(x)\n",
+        encoding="utf-8",
+    )
+
+    normal_file = tmp_path / "normal_safe.py"
+    normal_file.write_text(
+        "def safe():\n    return 42\n",
+        encoding="utf-8",
+    )
+
+    # 2. Standard scan (exclusions active): zero findings from ignored files
+    stats = ExclusionStats()
+    findings = scan_sast_dir(tmp_path, include_vendor=False, stats=stats)
+
+    assert len(findings) == 0, f"Expected 0 findings from ignored files, got {len(findings)}"
+    assert stats.counts.get("gitignore") == 2, (
+        f"Expected 2 gitignored files recorded, got {stats.counts}"
+    )
+
+    summary = stats.format_summary()
+    assert "2 files skipped (gitignore: 2)" in summary
+
+    # 3. Scan with include_vendor=True: vulnerabilities in ignored files are found
+    findings_included = scan_sast_dir(tmp_path, include_vendor=True)
+    assert len(findings_included) >= 2, (
+        f"Expected at least 2 findings when exclusions bypassed, got {len(findings_included)}"
+    )

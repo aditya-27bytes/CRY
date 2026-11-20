@@ -1,5 +1,7 @@
 {
+  "suite": "synthetic_regression_suite",
   "version": "0.3.0",
+  "description": "Synthetic regression suite (13 curated micro-benchmarks)",
   "total_cases": 13,
   "found": 7,
   "missed": 0,

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -310,3 +311,32 @@ def test_target_service_offline_skips_http_headers() -> None:
         assert len(report.security_headers) == 0
         assert "3001" in (report.service_offline_message or "")
         assert "service offline" in (report.service_offline_message or "")
+
+
+def test_dual_stack_localhost_ipv6_fallback() -> None:
+    """When a dev server (e.g. Vite) listens on ::1 (IPv6), dual-stack fallback marks port OPEN."""
+
+    def mock_probe(ip: str, port: int, **kwargs: Any) -> tuple[str, str | None]:
+        # Emulate Vite bound to ::1 on Windows where 127.0.0.1 returns 10013
+        if port == 5173 and ip == "::1":
+            return "OPEN", None
+        return "FILTERED", "Code 10013"
+
+    with (
+        patch(
+            "cry.scanners.network.resolve_ip_and_dns",
+            return_value=(["127.0.0.1"], ["::1"], "localhost", True, False, None),
+        ),
+        patch("cry.scanners.network.verify_ip_before_connect", return_value="127.0.0.1"),
+        patch("cry.scanners.network.probe_tcp_port", side_effect=mock_probe),
+        patch(
+            "cry.scanners.network_http.httpx.Client.head",
+            return_value=type("MockResp", (), {"status_code": 200, "headers": {}})(),
+        ),
+    ):
+        report = audit_network_target("localhost:5173", allow_local=True)
+        assert report.service_offline is False
+        p5173 = next((p for p in report.ports_checked if p.port == 5173), None)
+        assert p5173 is not None
+        assert p5173.status == "OPEN"
+        assert len(report.security_headers) > 0

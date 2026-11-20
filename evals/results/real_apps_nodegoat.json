@@ -1,0 +1,91 @@
+{
+  "suite": "real_apps_benchmark",
+  "version": "0.4.1",
+  "results": [
+    {
+      "name": "OWASP NodeGoat",
+      "pinned_commit": "c5cb68a7084e4ae7dcc60e6a98768720a81841e8",
+      "passed": true,
+      "diffs": [],
+      "actual_totals": {
+        "blockers": 7,
+        "warnings": 4
+      },
+      "expected_totals": {
+        "blockers": 7,
+        "warnings": 4
+      },
+      "blockers": [
+        {
+          "file": "artifacts/cert/server.key",
+          "line": 1,
+          "title": "Private Key (RSA/EC/DSA/SSH)",
+          "cwe": "CWE-321"
+        },
+        {
+          "file": "app/data/allocations-dao.js",
+          "line": 73,
+          "title": "NoSQL Injection via $where Clause",
+          "cwe": "CWE-943"
+        },
+        {
+          "file": "app/data/allocations-dao.js",
+          "line": 78,
+          "title": "NoSQL Injection via $where Clause",
+          "cwe": "CWE-943"
+        },
+        {
+          "file": "app/routes/contributions.js",
+          "line": 32,
+          "title": "Use of eval() or exec() on Dynamic Input",
+          "cwe": "CWE-95"
+        },
+        {
+          "file": "app/routes/contributions.js",
+          "line": 33,
+          "title": "Use of eval() or exec() on Dynamic Input",
+          "cwe": "CWE-95"
+        },
+        {
+          "file": "app/routes/contributions.js",
+          "line": 34,
+          "title": "Use of eval() or exec() on Dynamic Input",
+          "cwe": "CWE-95"
+        },
+        {
+          "file": "app/routes/research.js",
+          "line": 16,
+          "title": "Server-Side Request Forgery (SSRF) via Dynamic HTTP Client",
+          "cwe": "CWE-918"
+        }
+      ],
+      "warnings": [
+        {
+          "file": "app/views/tutorial/a1.html",
+          "line": 220,
+          "title": "Hardcoded Password Assignment",
+          "cwe": "CWE-798"
+        },
+        {
+          "file": "Gruntfile.js",
+          "line": 165,
+          "title": "[Test/Build Fixture] Use of eval() or exec() on Dynamic Input",
+          "cwe": "CWE-95"
+        },
+        {
+          "file": "test/e2e/support/commands.js",
+          "line": 30,
+          "title": "[Test/Build Fixture] Use of eval() or exec() on Dynamic Input",
+          "cwe": "CWE-95"
+        },
+        {
+          "file": "app/routes/index.js",
+          "line": 72,
+          "title": "Potential Open Redirect",
+          "cwe": "CWE-601"
+        }
+      ],
+      "exclusions": "42 files skipped (vendor: 15, lockfile: 1, docs: 4, test_or_fixture: 21, build_config: 1)"
+    }
+  ]
+}

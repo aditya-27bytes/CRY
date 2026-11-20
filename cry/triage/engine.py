@@ -4,6 +4,11 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from cry.exclusions import (
+    is_build_or_task_file,
+    is_documentation_file,
+    is_test_or_fixture_file,
+)
 from cry.models import (
     Category,
     Finding,
@@ -126,33 +131,14 @@ TEST_FILE_EXACT: set[str] = {
 
 
 def _is_test_file(file_path_str: str | None, base_dir: Path | None = None) -> bool:
-    """Check if file lives under a test, mock, fixture, or sample directory or matches test naming patterns."""
+    """Check if file lives under test, mock, fixture, build config, or documentation path."""
     if not file_path_str:
         return False
-    p = Path(file_path_str)
-    name_lower = p.name.lower()
-
-    # 1. Exact or prefix/suffix filename match
-    if name_lower in TEST_FILE_EXACT:
+    if is_documentation_file(file_path_str):
         return True
-    if name_lower.startswith(TEST_FILE_PREFIXES):
+    if is_build_or_task_file(file_path_str):
         return True
-    if name_lower.endswith(TEST_FILE_SUFFIXES):
-        return True
-
-    # 2. Check relative file path within scanned repository
-    rel_parts = {part.lower() for part in p.parts}
-    if rel_parts & TEST_DIR_NAMES:
-        return True
-
-    # 3. Check full resolved path if base_dir provided
-    if base_dir:
-        full_path = p if p.is_absolute() else base_dir / p
-        parts = {part.lower() for part in full_path.parts}
-        if parts & TEST_DIR_NAMES:
-            return True
-
-    return False
+    return is_test_or_fixture_file(file_path_str, base_dir)
 
 
 def _generate_deep_heuristic_reasoning(f: Finding) -> str:
@@ -374,6 +360,7 @@ class TriageEngine:
         self,
         findings: list[Finding],
         target_dir: Path,
+        include_tests_and_docs: bool = False,
     ) -> VerdictReport:
         """Analyze raw findings and produce an enriched VerdictReport.
 
@@ -402,7 +389,7 @@ class TriageEngine:
         for f in findings:
             ctx = extract_code_context(target_dir, f.file_path, f.line_start)
             cg = build_context_graph(target_dir, f.file_path, f.line_start)
-            in_test_file = _is_test_file(f.file_path, target_dir)
+            in_test_file = (not include_tests_and_docs) and _is_test_file(f.file_path, target_dir)
 
             # SMART HYBRID ROUTING RULE 1: Secret exposures
             # High-entropy cryptographic secrets or API keys are deterministic.
@@ -543,10 +530,12 @@ class TriageEngine:
                         )
 
                         if status == TriageStatus.CONFIRMED_BLOCKER:
-                            if _is_test_file(finding.file_path, target_dir):
+                            if (not include_tests_and_docs) and _is_test_file(
+                                finding.file_path, target_dir
+                            ):
                                 triaged.status = TriageStatus.WARNING
                                 triaged.exploitability_reasoning = (
-                                    f"[Test Scope Advisory]: Non-blocking warning. Finding is in test/mock file ({finding.file_path}). "
+                                    f"[Test/Non-Prod Scope Advisory]: Non-blocking warning. Finding is in test/mock/doc file ({finding.file_path}). "
                                     + triaged.exploitability_reasoning
                                 )
                                 warnings.append(triaged)
@@ -560,7 +549,9 @@ class TriageEngine:
                     # Fallback for any items in batch missed by LLM
                     for f, _ in batch:
                         if f.id not in batch_triaged_ids:
-                            f_in_test = _is_test_file(f.file_path, target_dir)
+                            f_in_test = (not include_tests_and_docs) and _is_test_file(
+                                f.file_path, target_dir
+                            )
                             default_status = (
                                 TriageStatus.WARNING
                                 if f_in_test or f.severity != Severity.CRITICAL
@@ -583,7 +574,9 @@ class TriageEngine:
                 except PrivacyGuardBlockedError as e:
                     llm_errors.append(f"Privacy Guard active: {e}")
                     for f, _ in batch:
-                        f_in_test = _is_test_file(f.file_path, target_dir)
+                        f_in_test = (not include_tests_and_docs) and _is_test_file(
+                            f.file_path, target_dir
+                        )
                         default_status = (
                             TriageStatus.WARNING
                             if f_in_test or f.severity != Severity.CRITICAL
@@ -606,7 +599,9 @@ class TriageEngine:
                 except LLMClientError as e:
                     llm_errors.append(str(e))
                     for f, _ in batch:
-                        f_in_test = _is_test_file(f.file_path, target_dir)
+                        f_in_test = (not include_tests_and_docs) and _is_test_file(
+                            f.file_path, target_dir
+                        )
                         default_status = (
                             TriageStatus.WARNING
                             if f_in_test or f.severity != Severity.CRITICAL
@@ -629,7 +624,7 @@ class TriageEngine:
         elif llm_findings_with_context and not self.client.is_configured:
             # Client not configured: triage remaining candidates with heuristic
             for f, _ in llm_findings_with_context:
-                f_in_test = _is_test_file(f.file_path, target_dir)
+                f_in_test = (not include_tests_and_docs) and _is_test_file(f.file_path, target_dir)
                 default_status = (
                     TriageStatus.WARNING
                     if f_in_test or f.severity != Severity.CRITICAL
@@ -680,7 +675,14 @@ class TriageEngine:
             )
 
         if llm_errors:
-            summary += f" (Note: Partial AI fallback occurred: {llm_errors[0]})"
+            first_err = llm_errors[0]
+            if "json_validate_failed" in first_err or "Failed to generate JSON" in first_err:
+                first_err = "LLM schema validation error (remediated with fallback)"
+            elif "HTTP 400" in first_err:
+                first_err = "LLM provider HTTP 400 Bad Request"
+            elif len(first_err) > 120:
+                first_err = first_err[:117] + "..."
+            summary += f" (Note: Partial AI fallback occurred: {first_err})"
 
         if llm_findings_with_context and self.client.is_configured:
             active_model_desc = f"{self.client.model} (Smart Hybrid Routing)"
@@ -701,14 +703,41 @@ class TriageEngine:
             failover_events=list(self.client.failover_events),
         )
 
-    def _heuristic_fallback(self, findings: list[Finding], target_dir: Path) -> VerdictReport:
+    def _heuristic_fallback(
+        self,
+        findings: list[Finding],
+        target_dir: Path,
+        include_tests_and_docs: bool = False,
+    ) -> VerdictReport:
         """Deterministic, comprehensive security evaluation when LLM is unavailable."""
         blockers: list[TriagedFinding] = []
         warnings: list[TriagedFinding] = []
         likely_false_positives: list[TriagedFinding] = []
 
+        # Deduplicate duplicate findings on identical (file_path, line_start, cwe_id),
+        # preserving the highest severity finding across scanner modules.
+        severity_rank = {
+            Severity.CRITICAL: 4,
+            Severity.HIGH: 3,
+            Severity.MEDIUM: 2,
+            Severity.LOW: 1,
+            Severity.INFO: 0,
+        }
+        loc_map: dict[tuple[str, int, str], Finding] = {}
+        effective_findings: list[Finding] = []
         for f in findings:
-            in_test_file = _is_test_file(f.file_path, target_dir)
+            if f.file_path is not None and f.line_start is not None and f.cwe_id is not None:
+                key = (f.file_path, f.line_start, f.cwe_id)
+                if key not in loc_map or severity_rank.get(f.severity, 0) > severity_rank.get(
+                    loc_map[key].severity, 0
+                ):
+                    loc_map[key] = f
+            else:
+                effective_findings.append(f)
+        effective_findings.extend(loc_map.values())
+
+        for f in effective_findings:
+            in_test_file = (not include_tests_and_docs) and _is_test_file(f.file_path, target_dir)
 
             if getattr(f, "confidence", 1.0) < 0.3:
                 status = TriageStatus.LIKELY_FALSE_POSITIVE
