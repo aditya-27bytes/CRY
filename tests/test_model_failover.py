@@ -471,3 +471,53 @@ def test_groq_json_validate_failed_retry_without_json_format() -> None:
     assert "response_format" in calls[0]
     assert "response_format" not in calls[1]
     assert result["triage_results"][0]["finding_id"] == "net-recovered"
+
+
+def test_local_model_http422_response_format_unsupported_retry() -> None:
+    """Ensure local server returning HTTP 422 for unsupported response_format automatically falls back."""
+    calls: list[dict[str, Any]] = []
+
+    async def mock_send(
+        url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> httpx.Response:
+        calls.append(payload)
+        if "response_format" in payload:
+            return httpx.Response(
+                status_code=422,
+                json={"error": {"message": "Extra inputs are not permitted: response_format"}},
+                request=httpx.Request("POST", url),
+            )
+        else:
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"triage_results": [{"finding_id": "local-ast-1", "status": "CONFIRMED_BLOCKER"}]}'
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 15, "completion_tokens": 15, "total_tokens": 30},
+                },
+                request=httpx.Request("POST", url),
+            )
+
+    client = LLMClient(
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",
+        model="llama3.3:70b",
+    )
+    client._send_request = mock_send  # type: ignore[method-assign]
+
+    result, usage = _run_coroutine_sync(
+        client.chat_completion_json(
+            system_prompt="system",
+            user_prompt="user",
+            findings_count=1,
+        )
+    )
+    assert len(calls) == 2
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+    assert result["triage_results"][0]["finding_id"] == "local-ast-1"

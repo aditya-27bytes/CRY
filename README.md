@@ -242,10 +242,14 @@ cry full --no-ai
 ### 7. Export Audit Reports (Markdown & JSON)
 ```bash
 # Export GitHub/GitLab PR-ready Markdown audit:
-cry scan full -m AUDIT.md
+cry full -m AUDIT.md
+# Or for a specific directory/file:
+cry scan src/ -m AUDIT.md
 
 # Export machine-readable JSON for CI/CD pipelines:
-cry scan full -o report.json
+cry full -o report.json
+# Or for a specific directory/file:
+cry scan src/ -o report.json
 ```
 
 ### 8. Bring Your Own Model (BYOM) & AI Benchmarking
@@ -320,7 +324,7 @@ See [BENCHMARK.md](BENCHMARK.md) for full execution logs, methodology, and versi
 ## 🧪 Running Automated Tests
 
 ```bash
-# Run full pytest test suite (126 passing unit tests)
+# Run full pytest test suite (131 passing unit tests)
 pytest -v
 
 # Run linter and type checker

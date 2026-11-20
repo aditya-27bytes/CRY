@@ -199,9 +199,12 @@ class LLMClient:
 
         response = await self._send_request(url, headers=headers, payload=payload)
 
-        # Handle provider-level JSON validation rejection (e.g. Groq json_validate_failed HTTP 400)
-        if response.status_code == 400 and (
-            "json_validate_failed" in response.text or "Failed to generate JSON" in response.text
+        # Handle provider-level JSON validation rejection (e.g. Groq json_validate_failed HTTP 400 or local LLMs rejecting response_format)
+        if response.status_code in (400, 422) and (
+            "json_validate_failed" in response.text
+            or "Failed to generate JSON" in response.text
+            or "response_format" in response.text
+            or "json_object" in response.text
         ):
             # Attempt 1: Salvage generation from error payload
             try:
